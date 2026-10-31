@@ -119,8 +119,12 @@ def preflight(ctx, config: Config):
         # The updater compares the version with the latest tag. A build whose
         # version is behind its own tag would offer itself as an update to
         # itself at every start, so a mismatch fails here instead.
-        ref = os.environ.get("GITHUB_REF_NAME", "")
-        if os.environ.get("GITHUB_REF_TYPE") == "tag" and ref != config.tag:
+        # VKIT_TAG for a dispatched run, whose ref is a branch: GitHub does
+        # not let a workflow overwrite GITHUB_REF_NAME.
+        ref = os.environ.get("VKIT_TAG") or (
+            os.environ.get("GITHUB_REF_NAME", "")
+            if os.environ.get("GITHUB_REF_TYPE") == "tag" else "")
+        if ref and ref != config.tag:
             raise StepError(f"tag {ref!r} does not match the version file "
                             f"(expected {config.tag!r}) — bump it first")
     else:
