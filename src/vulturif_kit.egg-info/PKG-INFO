@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: vulturif-kit
+Version: 0.1.0
+Summary: What every Vulturif app shares: updater, signed releases, opt-in stats, error reports, encrypted credentials — and the release CLI.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.31
+Provides-Extra: release
+Requires-Dist: cryptography>=42; extra == "release"
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: cryptography>=42; extra == "dev"

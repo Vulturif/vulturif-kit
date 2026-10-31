@@ -1,0 +1,21 @@
+# What `vkit release` makes of this app. See vulturif_kit/release/config.py.
+app = "{app}"
+slug = "{slug}"
+version_file = "version.py"
+release_repo = "Vulturif/{app}"
+
+[build]
+spec = "{app}.spec"
+# command = ["{python}", "tools/build_exe.py"]   # instead of spec
+dist = "dist"
+assets = ["{app}.exe"]                           # main exe first
+# zip = { "{app}-extension.zip" = "extension" }  # name = folder in dist
+
+# [docs]
+# readme = "README.md"
+# screenshots = "docs/screenshots"
+
+[sync]
+ssh = "vulturif@diphda.uberspace.de"
+dir = "~/publicdistribution"
+wait = 600

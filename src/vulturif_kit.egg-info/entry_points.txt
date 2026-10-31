@@ -1,0 +1,2 @@
+[console_scripts]
+vkit = vulturif_kit.release.cli:main
