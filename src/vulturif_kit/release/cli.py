@@ -4,7 +4,9 @@
     vkit release --skip docs  the same without one step
     vkit build | sign | publish | docs | sync    one step on its own
     vkit verify               does the site serve what dist/ holds?
-    vkit bump 1.2.0           write the version file
+    vkit bump 1.2.0           write the version file (or patch/minor/major)
+    vkit cut patch --push     bump, commit, tag, push: what CI does when
+                              vulturif.com's admin asks for a release
     vkit init                 vulturif.toml (+ --workflow) for a new app
     vkit keygen               a new signing key pair, once ever
 
@@ -67,7 +69,14 @@ def cmd_bump(args):
     config = cfg.load(args.config)
     before = config.version
     cfg.set_version(config, args.version)
-    print(f"{config.version_file.name}: {before} -> {args.version}")
+    print(f"{config.version_file.name}: {before} -> {config.version}")
+
+
+def cmd_cut(args):
+    config = cfg.load(args.config)
+    ctx = _context(args)
+    ctx.say(f"==> cut {args.bump}")
+    steps.cut(ctx, config, args.bump, push=args.push)
 
 
 def cmd_init(args):
@@ -107,10 +116,11 @@ def cmd_keygen(args):
     public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     print("There is one key pair for all the apps, and it exists already —")
     print("a new one only makes sense if the old private key is lost or out.")
-    print("Then: every copy out there needs one last release signed with the")
-    print("old key that pins the new public one.\n")
+    print("Then: add the public key to PUBLIC_KEYS in vulturif_kit/app.py, ship")
+    print("one release per app still signed with the old key, and only then")
+    print("switch UPDATE_SIGNING_KEY (see the comment on PUBLIC_KEYS).\n")
     print(f"{steps.KEY_ENV} (secret):  {base64.b64encode(private).decode()}")
-    print(f"PUBLIC_KEY (pinned):       {base64.b64encode(public).decode()}")
+    print(f"PUBLIC_KEYS (pinned):      {base64.b64encode(public).decode()}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -154,8 +164,17 @@ def parser() -> argparse.ArgumentParser:
     v.set_defaults(func=cmd_verify)
 
     b = sub.add_parser("bump", help="set the version")
-    b.add_argument("version")
+    b.add_argument("version", help="1.2.0, or patch / minor / major")
     b.set_defaults(func=cmd_bump)
+
+    c = sub.add_parser("cut", help="bump, commit and tag a release")
+    c.add_argument("bump", help="patch / minor / major, or a version")
+    c.add_argument("--push", action="store_true", help="push commit and tag to origin")
+    c.add_argument("--notes", help="the tag message, which becomes the release notes")
+    c.add_argument("--notes-file")
+    c.add_argument("--ci", action="store_true", help="commit as github-actions[bot]")
+    c.add_argument("--dry-run", action="store_true")
+    c.set_defaults(func=cmd_cut)
 
     i = sub.add_parser("init", help=f"write {cfg.FILE} for this app")
     i.add_argument("--app")

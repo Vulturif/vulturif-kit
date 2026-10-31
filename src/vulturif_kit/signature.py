@@ -107,8 +107,24 @@ def manifest(app: str, tag: str, files) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def signed_hashes(release: dict, app: str, public_key: str):
+def keys(public_keys) -> tuple:
+    """One pinned key or several, as a tuple without empty ones."""
+    if isinstance(public_keys, str):
+        public_keys = (public_keys,)
+    return tuple(k for k in public_keys or () if k)
+
+
+def verify_any(public_keys, message: bytes, sig: bytes) -> bool:
+    """Whether `sig` is a signature of `message` by any of the pinned keys."""
+    return any(verify(base64.b64decode(k), message, sig) for k in keys(public_keys))
+
+
+def signed_hashes(release: dict, app: str, public_keys):
     """{file name: sha256} from the release's verified SHA256SUMS.
+
+    `public_keys` is one pinned key or several: a signature by any of them
+    counts, which is what lets the signing key change without locking out
+    the copies already installed (see app.PUBLIC_KEYS).
 
     None when there is nothing to go by: no key pinned, or a release without
     a manifest (the caller decides what an unsigned release is worth). Raises
@@ -116,13 +132,13 @@ def signed_hashes(release: dict, app: str, public_key: str):
     another app or version than the one offered.
     """
     text, signature = release.get("manifest"), release.get("signature")
-    if not public_key or not (text and signature):
+    if not keys(public_keys) or not (text and signature):
         return None
     try:
         sig = base64.b64decode(signature, validate=True)
     except ValueError:
         raise BadSignature("the release signature is not valid base64") from None
-    if not verify(base64.b64decode(public_key), text.encode("utf-8"), sig):
+    if not verify_any(public_keys, text.encode("utf-8"), sig):
         raise BadSignature("the release signature does not match")
     first, *lines = text.splitlines()
     version = (release.get("version") or "").lstrip("v")

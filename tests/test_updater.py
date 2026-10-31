@@ -145,10 +145,35 @@ def test_app_wires_the_endpoints():
     assert kit.updater is kit.updater
 
 
-def test_pinned_key_is_the_one_the_apps_ship():
-    # Leashware's and Goonwall's updatesig.py pin this; changing it here
-    # would lock every installed copy out of its updates.
+def test_pinned_keys_are_the_new_one_and_the_one_out_there():
+    # Every copy released before the kit pins the old key and only that, so
+    # releases must stay signed with it until the copies have a build that
+    # knows the new one too. Dropping either here locks someone out.
     import vulturif_kit
-    assert vulturif_kit.PUBLIC_KEY == "jtJ0ZoBR2HTQ+1w2larK2ALUSZHAeSN/W1MGdMSnPXs="
-    assert len(base64.b64decode(vulturif_kit.PUBLIC_KEY)) == 32
+    assert vulturif_kit.PUBLIC_KEYS == ("q4Hydg6++n6jwG6OQr94Q+ForxIOiseyGlpLcjUfx2Q=",
+                                        "jtJ0ZoBR2HTQ+1w2larK2ALUSZHAeSN/W1MGdMSnPXs=")
+    for key in vulturif_kit.PUBLIC_KEYS:
+        assert signature._decode(base64.b64decode(key)) is not None
     assert Path(signature.__file__).exists()
+
+
+def test_either_pinned_key_may_sign(keys):
+    old, new = keys, type(keys)()
+    both = Updater("Demo", "1.1.0", "https://x/latest/", (new.public, old.public))
+    assert both.newer(signed_release(old)) is not None
+    assert both.newer(signed_release(new)) is not None
+    with pytest.raises(BadSignature):
+        both.newer(signed_release(type(keys)()))
+
+
+def test_sign_takes_either_pinned_key(tmp_path, keys, monkeypatch):
+    from vulturif_kit.release import steps
+    from vulturif_kit.release.config import Config
+    (tmp_path / "version.py").write_text('__version__ = "1.2.0"\n')
+    (tmp_path / "Demo.exe").write_bytes(b"build")
+    config = Config(root=tmp_path, app="Demo", slug="demo", release_repo="x",
+                    version_file=tmp_path / "version.py", dist=tmp_path,
+                    assets=["Demo.exe"])
+    monkeypatch.setenv(steps.KEY_ENV, keys.secret)
+    steps.sign(steps.Context(public_keys=(type(keys)().public, keys.public)), config)
+    assert (tmp_path / "SHA256SUMS.sig").exists()

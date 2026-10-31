@@ -1,33 +1,54 @@
 name: Build & release
 
-# Push a tag like v1.0.4 and this builds, signs and publishes the release on
-# the public repo named in vulturif.toml — the same steps `vkit release` runs
-# locally, minus the ssh sync (vulturif.com's cron picks it up within 30
-# minutes). Release locally OR push the tag, not both: a local
-# `vkit release --push-tag` would publish twice.
+# Two ways in, the same release out (vkit, with vulturif.toml):
 #
-# An annotated tag's message becomes the release notes:
-#   git tag -a v1.0.4 -m "- Fixed the thing"  &&  git push origin v1.0.4
+#   - "New release" in vulturif.com's admin (or Actions -> Run workflow):
+#     `vkit cut` bumps version.py, commits and tags it with the notes as the
+#     tag message and pushes both, then the release runs from that commit.
+#   - A pushed tag: git tag -a v1.0.4 -m "- Fixed the thing" && git push
+#     origin v1.0.4 — version.py must already say 1.0.4.
+#
+# Either way it builds, signs, publishes on the public repo and has
+# vulturif.com sync it at once through its release hook, then checks that the
+# site serves exactly what was built. The tag pushed by `vkit cut` uses this
+# run's own token, so it does not start a second run.
 #
 # Secrets of THIS repo:
-#   RELEASE_TOKEN       fine-grained PAT, Contents: Read and write on the
-#                       public repo (GITHUB_TOKEN cannot write to another one)
-#   UPDATE_SIGNING_KEY  the Ed25519 key; `vkit sign` refuses any other
+#   RELEASE_TOKEN        fine-grained PAT, Contents: Read and write on the
+#                        public repo (GITHUB_TOKEN cannot write there)
+#   UPDATE_SIGNING_KEY   the Ed25519 key; `vkit sign` refuses any other
+#   VULTURIF_HOOK_TOKEN  RELEASE_HOOK_TOKEN from the server's .env; without
+#                        it the site's cron syncs within 30 minutes
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which part of version.py to count up'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      notes:
+        description: 'Release notes (the tag message)'
+        required: false
 
 permissions:
-  contents: read   # only for checking out this repo; the release uses RELEASE_TOKEN
+  contents: write   # the bump commit and its tag; the release uses RELEASE_TOKEN
+
+concurrency:
+  group: release    # two bumps at once would both pick the same next version
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+  UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+  VULTURIF_HOOK_TOKEN: ${{ secrets.VULTURIF_HOOK_TOKEN }}
 
 jobs:
   release:
     runs-on: windows-latest
-    env:
-      GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
     steps:
       - uses: actions/checkout@v5
 
@@ -47,11 +68,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller "vulturif-kit[release] @ git+https://github.com/Vulturif/vulturif-kit@v0.1.0"
+          pip install pyinstaller "vulturif-kit[release] @ git+https://github.com/Vulturif/vulturif-kit@v0.2.0"
 
       - name: Tag message for the release notes
+        if: github.event_name == 'push'
         # checkout fetches the tag as a ref only; fetch the tag object too.
         run: git fetch --force origin "refs/tags/${env:GITHUB_REF_NAME}:refs/tags/${env:GITHUB_REF_NAME}"
 
+      - name: Bump, commit and tag
+        if: github.event_name == 'workflow_dispatch'
+        # Inputs reach the script as environment variables, never pasted
+        # into it: notes are free text.
+        env:
+          BUMP: ${{ inputs.bump }}
+          NOTES: ${{ inputs.notes }}
+        run: vkit cut $env:BUMP --ci --push --notes "$env:NOTES"
+
+      # After the push above, which must still use this run's own token.
       - run: gh auth setup-git
-      - run: vkit release --ci --skip sync
+      - run: vkit release --ci

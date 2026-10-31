@@ -79,11 +79,11 @@ def can_update() -> bool:
 
 class Updater:
     def __init__(self, app: str, version: str, latest_url: str,
-                 public_key: str, assets=None, require_signature: bool = True):
+                 public_keys, assets=None, require_signature: bool = True):
         self.app = app
         self.version = version
         self.latest_url = latest_url
-        self.public_key = public_key
+        self.public_keys = signature.keys(public_keys)   # one key or several
         # False only for the one release that brings signing to an app, so
         # copies already out there can still take a build that went out
         # unsigned; after that an unsigned release is no longer offered.
@@ -131,7 +131,7 @@ class Updater:
         found = {a.get("name"): a for a in release.get("assets", [])}
         if self.main_asset not in found:
             return None
-        signed = signature.signed_hashes(release, self.app, self.public_key)
+        signed = signature.signed_hashes(release, self.app, self.public_keys)
         if signed is None and self.require_signature:
             return None
         names = [name for name in self.assets if name in found]

@@ -26,11 +26,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import signature
-from ..app import PUBLIC_KEY
-from .config import Config
+from ..app import PUBLIC_KEYS
+from .config import Config, set_version
 
 ORDER = ("preflight", "build", "sign", "publish", "docs", "sync")
 KEY_ENV = "UPDATE_SIGNING_KEY"
+# The token of vulturif.com's release hook (RELEASE_HOOK_TOKEN on the server).
+HOOK_ENV = "VULTURIF_HOOK_TOKEN"
 SUMS, SIG = "SHA256SUMS", "SHA256SUMS.sig"
 
 
@@ -47,7 +49,7 @@ class Context:
     allow_unsigned: bool = False
     allow_dirty: bool = False
     push_tag: bool = False
-    public_key: str = PUBLIC_KEY
+    public_keys: tuple = PUBLIC_KEYS
 
     def say(self, text: str):
         print(text, flush=True)
@@ -141,6 +143,34 @@ def preflight(ctx, config: Config):
         ctx.say("   warning: this release goes out unsigned")
 
 
+def cut(ctx, config: Config, bump: str, push: bool = False):
+    """Bump the version, commit it and tag it — what a release from
+    vulturif.com's admin starts with. `push` sends both to origin; pushed
+    from CI with its own token, the tag starts no second workflow run.
+
+    The tree must be clean apart from the version file, so the commit holds
+    the bump and nothing else.
+    """
+    before = config.version
+    if _git(ctx, config, "status", "--porcelain", "--untracked-files=no",
+            changes=False).stdout.strip():
+        raise StepError("uncommitted changes — a release commit holds the bump only")
+    if ctx.dry_run:
+        ctx.say(f"   (dry run) {before} -> {bump}, commit, tag")
+        return
+    set_version(config, bump)
+    version_file = config.version_file.relative_to(config.root).as_posix()
+    who = (["-c", "user.name=github-actions[bot]", "-c",
+            "user.email=41898282+github-actions[bot]@users.noreply.github.com"]
+           if ctx.ci else [])
+    _git(ctx, config, *who, "commit", "-m", f"{config.app} {config.tag}",
+         "--", version_file)
+    _git(ctx, config, *who, "tag", "-a", config.tag, "-m", notes(ctx, config))
+    ctx.say(f"   {before} -> {config.version}, tagged {config.tag}")
+    if push:
+        _git(ctx, config, "push", "origin", "HEAD", f"refs/tags/{config.tag}")
+
+
 def _local_tag(ctx, config):
     """Build exactly what the tag says: a clean tree, at the tag."""
     if _git(ctx, config, "rev-parse", "--git-dir", check=False,
@@ -221,11 +251,11 @@ def sign(ctx, config: Config):
 
     data = signature.manifest(config.app, config.tag, files)
     sig = Ed25519PrivateKey.from_private_bytes(key).sign(data)
-    # The key the apps have pinned, not merely "a" key: a release signed
-    # with the wrong one would be refused by every copy out there.
-    if not signature.verify(base64.b64decode(ctx.public_key), data, sig):
-        raise StepError("the signing key does not belong to the pinned public "
-                        "key — every installed copy would refuse this release")
+    # A key the apps have pinned, not merely "a" key: a release signed with
+    # another would be refused by every copy out there.
+    if not signature.verify_any(ctx.public_keys, data, sig):
+        raise StepError("the signing key belongs to none of the pinned public "
+                        "keys — every installed copy would refuse this release")
     (config.dist / SUMS).write_bytes(data)
     (config.dist / SIG).write_text(base64.b64encode(sig).decode() + "\n")
     for line in data.decode().splitlines():
@@ -297,6 +327,13 @@ def docs(ctx, config: Config):
 # --- sync --------------------------------------------------------------------
 
 def sync(ctx, config: Config):
+    """Have the site import the release now, then check what it serves.
+
+    Over ssh where there is one (the dev machine); else, with HOOK_ENV set
+    (CI), by the site's release hook, which starts the same sync in the
+    background; else the site's own cron sync is waited for.
+    """
+    hook = os.environ.get(HOOK_ENV, "").strip()
     if config.ssh and not ctx.ci:
         # sync_github_releases holds its own lock: when the cron run is
         # already at it this says "skipping", and the wait below covers it.
@@ -304,9 +341,27 @@ def sync(ctx, config: Config):
                  f"cd {config.site_dir} && set -a && . ./.env && set +a && "
                  f".venv/bin/python manage.py sync_github_releases "
                  f"--project {config.slug}"])
+    elif hook:
+        url = f"{config.site}/hook/{config.slug}/release/"
+        if ctx.dry_run:
+            ctx.say(f"   (dry run) POST {url}")
+        else:
+            import requests
+            r = requests.post(url, timeout=30,
+                              headers={"Authorization": f"Bearer {hook}",
+                                       "User-Agent": f"vkit/{config.app}"})
+            if r.status_code != 202:
+                raise StepError(f"{url} answered {r.status_code}: {r.text[:200]}")
+            ctx.say("   vulturif.com is syncing")
+    elif ctx.ci:
+        # The release is out; failing the run for the cron's half hour
+        # would only make it look as if it were not.
+        ctx.say(f"   no {HOOK_ENV}: the site's own sync picks it up within "
+                "30 minutes")
+        return
     else:
-        ctx.say("   no [sync] ssh here: waiting for the site's own sync "
-                "(every 30 minutes)")
+        ctx.say(f"   no [sync] ssh and no {HOOK_ENV}: waiting for the site's "
+                "own sync (every 30 minutes)")
     if ctx.dry_run:
         return
     verify_site(ctx, config, wait=config.wait)
@@ -333,7 +388,7 @@ def verify_site(ctx, config: Config, wait: int = 0, interval: int = 15):
         time.sleep(interval)
 
     site = {a["name"]: a for a in answer.get("assets", [])}
-    signed = signature.signed_hashes(answer, config.app, ctx.public_key)
+    signed = signature.signed_hashes(answer, config.app, ctx.public_keys)
     for path in config.released_files():
         if not path.is_file():
             continue    # a sync run on its own, without the build here

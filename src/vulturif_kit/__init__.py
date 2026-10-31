@@ -18,11 +18,11 @@ The release side (build, sign, GitHub release, vulturif.com sync) is the
 `vkit` command in vulturif_kit.release, which the exe never imports.
 """
 
-from .app import PUBLIC_KEY, SITE, App
+from .app import PUBLIC_KEYS, SITE, App
 from .signature import BadSignature
 from .updater import Asset, Update
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-__all__ = ["App", "Asset", "BadSignature", "PUBLIC_KEY", "SITE", "Update",
+__all__ = ["App", "Asset", "BadSignature", "PUBLIC_KEYS", "SITE", "Update",
            "__version__"]

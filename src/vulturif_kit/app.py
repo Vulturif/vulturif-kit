@@ -23,23 +23,34 @@ from .securestore import SecureStore
 from .updater import Updater
 
 SITE = "https://vulturif.com"
-# From PublicDistribution's scripts/make_signing_key.py — or `vkit keygen`.
-# Its private half is UPDATE_SIGNING_KEY, a GitHub Actions secret of each
-# app's source repo and nowhere else: someone who takes over vulturif.com
-# still cannot sign an update.
-PUBLIC_KEY = "jtJ0ZoBR2HTQ+1w2larK2ALUSZHAeSN/W1MGdMSnPXs="
+# The keys an update may be signed with, from `vkit keygen`. Each one's
+# private half is UPDATE_SIGNING_KEY, a GitHub Actions secret of the apps'
+# source repos and nowhere else: someone who takes over vulturif.com still
+# cannot sign an update. A signature by any of them is accepted.
+#
+# More than one only while the key changes. Copies already out there know
+# only the keys their build pinned, so:
+#   1. ship one release per app, still signed with the old key, whose build
+#      pins both (this is where we are: new first, old second);
+#   2. once most copies have it, switch UPDATE_SIGNING_KEY to the new key;
+#   3. much later, drop the old key here. A copy that skipped step 1's
+#      release has to be downloaded by hand once.
+PUBLIC_KEYS = (
+    "q4Hydg6++n6jwG6OQr94Q+ForxIOiseyGlpLcjUfx2Q=",    # new, from 2026-10-31
+    "jtJ0ZoBR2HTQ+1w2larK2ALUSZHAeSN/W1MGdMSnPXs=",    # old, to be dropped
+)
 
 
 class App:
     def __init__(self, name: str, version: str, slug: str | None = None,
-                 assets=None, site: str = SITE, public_key: str = PUBLIC_KEY,
+                 assets=None, site: str = SITE, public_keys=PUBLIC_KEYS,
                  require_signature: bool = True, data_dir_name: str | None = None):
         self.name = name
         self.version = version
         self.slug = slug or name.lower()
         self.assets = tuple(assets or (f"{name}.exe",))   # main exe first
         self.site = site.rstrip("/")
-        self.public_key = public_key
+        self.public_keys = public_keys
         self.require_signature = require_signature
         self.data_dir_name = data_dir_name or name
 
@@ -49,7 +60,7 @@ class App:
     @cached_property
     def updater(self) -> Updater:
         return Updater(self.name, self.version, f"{self.site}/api/{self.slug}/latest/",
-                       self.public_key, self.assets, self.require_signature)
+                       self.public_keys, self.assets, self.require_signature)
 
     @cached_property
     def analytics(self) -> Analytics:

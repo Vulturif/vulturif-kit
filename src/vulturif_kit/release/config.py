@@ -124,8 +124,25 @@ def load(path=None) -> Config:
     return config
 
 
+BUMPS = ("patch", "minor", "major")
+
+
+def next_version(current: str, bump: str) -> str:
+    """`bump` is "patch", "minor", "major" or a version of its own."""
+    if bump not in BUMPS:
+        return bump
+    if not re.fullmatch(r"\d+\.\d+\.\d+", current):
+        raise ConfigError(f"cannot bump {current!r}: not three numbers")
+    major, minor, patch = (int(n) for n in current.split("."))
+    return {"patch": f"{major}.{minor}.{patch + 1}",
+            "minor": f"{major}.{minor + 1}.0",
+            "major": f"{major + 1}.0.0"}[bump]
+
+
 def set_version(config: Config, version: str):
-    """Write `version` into the version file, keeping everything around it."""
+    """Write `version` into the version file, keeping everything around it.
+    "patch", "minor" or "major" counts up from the version there."""
+    version = next_version(config.version, version)
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ConfigError(f"{version!r} is not three numbers — the updater "
                           "compares versions part by part")

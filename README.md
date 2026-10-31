@@ -36,8 +36,10 @@ creds = kit.credentials(CREDENTIAL_FIELDS)          # .env seeds the first run o
 | `credentials.py` | credential fields, DPAPI, .env as first-run seed | Leashware |
 
 Endpoints follow from the slug: `/api/<slug>/latest/`, `/collect/<slug>/`,
-`/report/<slug>/` on vulturif.com. The pinned public key is the one both apps
-ship today; `vkit sign` refuses any key that does not belong to it.
+`/report/<slug>/` on vulturif.com. `PUBLIC_KEYS` (app.py) are the keys an
+update may be signed with — while the signing key changes, the new one and
+the old one; the comment there has the steps. `vkit sign` refuses a key that
+belongs to none of them.
 
 **Compatibility to keep when porting:** Goonwall's store entropy is
 `b"VideoSelector/securestore/1"`; Leashware's credentials live in
@@ -76,10 +78,19 @@ leaves one out, `--dry-run` changes nothing. `vkit verify` only does the last
 check.
 
 **CI instead:** `vkit init --workflow` writes `.github/workflows/release.yml`,
-which runs `vkit release --ci --skip sync` on a pushed tag (the site's cron
-picks it up within 30 minutes). Release locally *or* push the tag — not both.
-CI installs the kit from `github.com/Vulturif/vulturif-kit`, so that repo has
-to exist (it holds nothing secret) before the workflow can run.
+which runs `vkit release --ci` on a pushed tag. Release locally *or* push the
+tag — not both. In CI the sync step calls vulturif.com's release hook with
+`$VULTURIF_HOOK_TOKEN` (the server's `RELEASE_HOOK_TOKEN`) and then waits
+for the site to serve the release; without the token it leaves it to the
+site's cron.
+
+**From vulturif.com:** the same workflow also takes a `workflow_dispatch`
+with `bump` (patch/minor/major) and `notes`, which is what "New release…" on
+a project in the site's admin sends (it needs the project's source repo and
+`GITHUB_DISPATCH_TOKEN` on the server). The run starts with
+`vkit cut <bump> --ci --push`: version file counted up, committed and tagged
+on the default branch, pushed with the run's own token so the tag starts no
+second run.
 
 ## Develop
 
