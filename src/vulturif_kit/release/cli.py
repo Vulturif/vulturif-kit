@@ -7,6 +7,9 @@
     vkit bump 1.2.0           write the version file (or patch/minor/major)
     vkit cut patch --push     bump, commit, tag, push: what CI does when
                               vulturif.com's admin asks for a release
+    vkit release --early      early access: the release goes to the private
+                              source repo, for supporters only
+    vkit promote              that release, downloaded into dist/, goes public
     vkit init                 vulturif.toml (+ --workflow) for a new app
     vkit keygen               a new signing key pair, once ever
 
@@ -28,7 +31,8 @@ def _context(args) -> steps.Context:
         notes=_notes(args), key_file=getattr(args, "key_file", None),
         allow_unsigned=getattr(args, "allow_unsigned", False),
         allow_dirty=getattr(args, "allow_dirty", False),
-        push_tag=getattr(args, "push_tag", False))
+        push_tag=getattr(args, "push_tag", False),
+        early=getattr(args, "early", False))
 
 
 def _notes(args):
@@ -58,6 +62,15 @@ def cmd_release(args):
 
 def cmd_step(args):
     _run([args.step], args)
+
+
+def cmd_promote(args):
+    config = cfg.load(args.config)
+    ctx = _context(args)
+    ctx.say("==> promote")
+    steps.promote(ctx, config)
+    ctx.say(f"==> {config.app} {config.tag}: "
+            + ("dry run done" if ctx.dry_run else "public"))
 
 
 def cmd_verify(args):
@@ -93,13 +106,14 @@ def cmd_init(args):
                           encoding="utf-8")
         print(f"wrote {target}")
     if args.workflow:
-        flow = root / ".github" / "workflows" / "release.yml"
-        if flow.exists() and not args.force:
-            print(f"{flow} exists (--force to overwrite)")
-        else:
+        for name in ("release.yml", "promote.yml"):
+            flow = root / ".github" / "workflows" / name
+            if flow.exists() and not args.force:
+                print(f"{flow} exists (--force to overwrite)")
+                continue
             flow.parent.mkdir(parents=True, exist_ok=True)
             flow.write_text(resources.files(__package__)
-                            .joinpath("templates/release.yml")
+                            .joinpath(f"templates/{name}")
                             .read_text(encoding="utf-8"), encoding="utf-8")
             print(f"wrote {flow}")
 
@@ -141,6 +155,8 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("--allow-unsigned", action="store_true")
         s.add_argument("--notes", help="release notes (default: the tag message)")
         s.add_argument("--notes-file")
+        s.add_argument("--early", action="store_true",
+                       help="early access: publish on the private source repo")
 
     r = sub.add_parser("release", help="every step, in order")
     step_options(r)
@@ -158,6 +174,13 @@ def parser() -> argparse.ArgumentParser:
         if name == "preflight":
             s.add_argument("--allow-dirty", action="store_true")
         s.set_defaults(func=cmd_step, step=name)
+
+    pr = sub.add_parser("promote", help="an early release, downloaded into dist/, goes public")
+    pr.add_argument("--dry-run", action="store_true")
+    pr.add_argument("--ci", action="store_true")
+    pr.add_argument("--notes", help="release notes (default: the tag message)")
+    pr.add_argument("--notes-file")
+    pr.set_defaults(func=cmd_promote)
 
     v = sub.add_parser("verify", help="check what vulturif.com serves")
     v.add_argument("--wait", type=int, default=0, help="seconds to wait for it")
@@ -179,7 +202,7 @@ def parser() -> argparse.ArgumentParser:
     i = sub.add_parser("init", help=f"write {cfg.FILE} for this app")
     i.add_argument("--app")
     i.add_argument("--workflow", action="store_true",
-                   help="also .github/workflows/release.yml")
+                   help="also .github/workflows/release.yml and promote.yml")
     i.add_argument("--force", action="store_true")
     i.set_defaults(func=cmd_init)
 

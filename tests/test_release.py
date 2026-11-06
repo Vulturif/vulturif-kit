@@ -123,6 +123,7 @@ def test_init_writes_a_loadable_config(tmp_path, monkeypatch):
     c = cfg.load()
     assert (c.app, c.slug, c.ssh) == ("Thing", "thing", "vulturif@diphda.uberspace.de")
     assert (tmp_path / ".github" / "workflows" / "release.yml").exists()
+    assert (tmp_path / ".github" / "workflows" / "promote.yml").exists()
 
 
 def test_release_rejects_unknown_skip(project):

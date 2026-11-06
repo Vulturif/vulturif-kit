@@ -1,0 +1,70 @@
+name: Promote early access
+
+# vulturif.com starts this when an early-access release's three weeks are
+# over (its publish_embargoed cron, with GITHUB_DISPATCH_TOKEN). It builds
+# nothing: it downloads that release of THIS repo, and `vkit promote` checks
+# the files against their signed SHA256SUMS, publishes exactly them on the
+# public repo, mirrors the README of that tag and has the site sync. Then the
+# early copy here is deleted; the tag stays.
+#
+# Secrets: RELEASE_TOKEN and VULTURIF_HOOK_TOKEN, as for release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The early-access release to make public, e.g. v1.2.0'
+        required: true
+
+permissions:
+  contents: write   # deleting the early copy here; the public side uses RELEASE_TOKEN
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VULTURIF_HOOK_TOKEN: ${{ secrets.VULTURIF_HOOK_TOKEN }}
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  promote:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Install vkit
+        # Only the kit (the version that tag was built with) and cryptography:
+        # nothing is built here, so none of the app's own dependencies.
+        run: |
+          python -m pip install --upgrade pip
+          $kit = (Select-String -Path requirements.txt -Pattern '^vulturif-kit').Line
+          pip install "$kit" "cryptography>=42"
+
+      - name: Tag message for the release notes
+        run: git fetch --force origin "refs/tags/${env:TAG}:refs/tags/${env:TAG}"
+
+      - name: Download the early-access release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --dir dist
+
+      - name: Publish it
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VKIT_TAG: ${{ inputs.tag }}
+        # git, too, pushes the README mirror with RELEASE_TOKEN.
+        run: |
+          gh auth setup-git
+          vkit promote --ci
+
+      - name: Drop the early copy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete $env:TAG --repo $env:GITHUB_REPOSITORY --yes

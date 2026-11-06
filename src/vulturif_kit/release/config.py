@@ -4,6 +4,8 @@
     slug = "goonwall"                   # default: app in lower case
     version_file = "version.py"         # holds __version__ = "1.2.3"
     release_repo = "Vulturif/Goonwall"  # the public repo the site syncs from
+    source_repo = "Vulturif/GoonerWall" # private: early-access releases (--early);
+                                        # in CI the repo the workflow runs in
 
     [build]
     spec = "Goonwall.spec"              # PyInstaller one-file build, or
@@ -24,6 +26,7 @@
 Only `app` is required; a spec named "<App>.spec" is found by itself.
 """
 
+import os
 import re
 import sys
 import tomllib
@@ -45,6 +48,7 @@ class Config:
     slug: str
     version_file: Path
     release_repo: str
+    source_repo: str = ""
     spec: Path | None = None
     command: list | None = None
     dist: Path = None
@@ -109,6 +113,7 @@ def load(path=None) -> Config:
         root=root, app=app, slug=data.get("slug") or app.lower(),
         version_file=root / data.get("version_file", "version.py"),
         release_repo=data.get("release_repo") or f"Vulturif/{app}",
+        source_repo=data.get("source_repo") or os.environ.get("GITHUB_REPOSITORY", ""),
         spec=root / spec if spec else None, command=command,
         dist=root / build.get("dist", "dist"),
         assets=list(build.get("assets") or [f"{app}.exe"]),

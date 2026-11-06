@@ -57,6 +57,8 @@ vkit init                                  # vulturif.toml, guessed from *.spec
 vkit bump 1.2.0
 git commit -am "1.2.0"
 vkit release --notes "- Fixed the thing"
+vkit release --early                       # early access: on the private source repo
+vkit promote                               # that release (downloaded into dist/) goes public
 ```
 
 `vkit release` runs, and stops at the first failure:

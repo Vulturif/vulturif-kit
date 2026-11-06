@@ -13,6 +13,10 @@ name: Build & release
 # site serves exactly what was built. The tag pushed by `vkit cut` uses this
 # run's own token, so it does not start a second run.
 #
+# Early access ("early" ticked): the same build and signature, published as a
+# release of THIS private repo with this run's own token. vulturif.com syncs
+# it for supporters only and, three weeks later, starts promote.yml.
+#
 # Secrets of THIS repo:
 #   RELEASE_TOKEN        fine-grained PAT, Contents: Read and write on the
 #                        public repo (GITHUB_TOKEN cannot write there)
@@ -33,6 +37,10 @@ on:
       notes:
         description: 'Release notes (the tag message)'
         required: false
+      early:
+        description: 'Early access: supporters only for three weeks, then public'
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # the bump commit and its tag; the release uses RELEASE_TOKEN
@@ -88,4 +96,9 @@ jobs:
 
       # After the push above, which must still use this run's own token.
       - run: gh auth setup-git
-      - run: vkit release --ci
+      - name: Release
+        env:
+          GH_TOKEN: ${{ inputs.early && github.token || secrets.RELEASE_TOKEN }}
+          EARLY: ${{ inputs.early }}
+        run: |
+          if ($env:EARLY -eq 'true') { vkit release --ci --early } else { vkit release --ci }

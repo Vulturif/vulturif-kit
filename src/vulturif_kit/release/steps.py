@@ -12,6 +12,15 @@
 Each step can run on its own (`vkit build`, `vkit sign`, …), which is what
 the CI workflow does, and none of them keeps state between runs beyond the
 files in dist/.
+
+Early access (`--early`): the same build and signature, but published as a
+release of the private source repo instead of the public one. vulturif.com
+syncs it from there for supporters only, for three weeks; the README is not
+mirrored and the public answer is not checked, since neither changes. When
+the embargo ends the site starts the app's promote workflow, which downloads
+that release into dist/ and runs `vkit promote`: the very same files onto
+the public repo, then docs and sync. Nothing is rebuilt, so the hashes and
+the signature supporters already have stay those of the public release.
 """
 
 import base64
@@ -49,6 +58,7 @@ class Context:
     allow_unsigned: bool = False
     allow_dirty: bool = False
     push_tag: bool = False
+    early: bool = False
     public_keys: tuple = PUBLIC_KEYS
 
     def say(self, text: str):
@@ -111,26 +121,54 @@ def signing_key(ctx) -> bytes | None:
 
 # --- preflight ---------------------------------------------------------------
 
+def target_repo(ctx, config: Config) -> str:
+    """Where the release goes: the public repo, or for early access the source repo."""
+    if not ctx.early:
+        return config.release_repo
+    if not config.source_repo:
+        raise StepError("--early needs source_repo in vulturif.toml (in CI it is "
+                        "the repo the workflow runs in)")
+    if config.source_repo.lower() == config.release_repo.lower():
+        raise StepError("source_repo is the public release repo — an early "
+                        "release there would be public at once")
+    return config.source_repo
+
+
+def _check_ci_tag(config: Config):
+    # The updater compares the version with the latest tag. A build whose
+    # version is behind its own tag would offer itself as an update to
+    # itself at every start, so a mismatch fails here instead.
+    # VKIT_TAG for a dispatched run, whose ref is a branch: GitHub does
+    # not let a workflow overwrite GITHUB_REF_NAME.
+    ref = os.environ.get("VKIT_TAG") or (
+        os.environ.get("GITHUB_REF_NAME", "")
+        if os.environ.get("GITHUB_REF_TYPE") == "tag" else "")
+    if ref and ref != config.tag:
+        raise StepError(f"tag {ref!r} does not match the version file "
+                        f"(expected {config.tag!r}) — bump it first")
+
+
 def preflight(ctx, config: Config):
     version = config.version
     if not all(p.isdigit() for p in version.split(".")) or version.count(".") != 2:
         raise StepError(f"version {version!r} is not three numbers")
-    ctx.say(f"   {config.app} {config.tag} -> {config.release_repo}")
+    ctx.say(f"   {config.app} {config.tag} -> {target_repo(ctx, config)}"
+            + (" (early access)" if ctx.early else ""))
 
     if ctx.ci:
-        # The updater compares the version with the latest tag. A build whose
-        # version is behind its own tag would offer itself as an update to
-        # itself at every start, so a mismatch fails here instead.
-        # VKIT_TAG for a dispatched run, whose ref is a branch: GitHub does
-        # not let a workflow overwrite GITHUB_REF_NAME.
-        ref = os.environ.get("VKIT_TAG") or (
-            os.environ.get("GITHUB_REF_NAME", "")
-            if os.environ.get("GITHUB_REF_TYPE") == "tag" else "")
-        if ref and ref != config.tag:
-            raise StepError(f"tag {ref!r} does not match the version file "
-                            f"(expected {config.tag!r}) — bump it first")
+        _check_ci_tag(config)
     else:
         _local_tag(ctx, config)
+
+    if ctx.early:
+        # The embargo is only as good as the repo is private.
+        repo = target_repo(ctx, config)
+        seen = ctx.run(["gh", "repo", "view", repo, "--json", "visibility", "-q",
+                        ".visibility"], capture=True, check=False,
+                       changes=False).stdout.strip()
+        if seen and seen.upper() != "PRIVATE":
+            raise StepError(f"{repo} is {seen.lower()}: an early-access release "
+                            "there would be out for everyone")
 
     if ctx.run(["gh", "auth", "status"], capture=True, check=False,
                changes=False).returncode:
@@ -273,7 +311,7 @@ def publish(ctx, config: Config):
     missing = [f for f in files if not f.is_file()]
     if missing and not ctx.dry_run:
         raise StepError(f"missing {', '.join(str(f) for f in missing)} — build first")
-    repo = ["--repo", config.release_repo]
+    repo = ["--repo", target_repo(ctx, config)]
     # Idempotent: create the release the first time, replace the files on
     # re-runs.
     exists = not ctx.run(["gh", "release", "view", config.tag, *repo],
@@ -286,7 +324,8 @@ def publish(ctx, config: Config):
         f.write(notes(ctx, config))
     try:
         ctx.run(["gh", "release", "create", config.tag, *files, *repo,
-                 "--title", f"{config.app} {config.tag}", "--notes-file", f.name])
+                 "--title", f"{config.app} {config.tag}"
+                 + (" (early access)" if ctx.early else ""), "--notes-file", f.name])
     finally:
         os.unlink(f.name)
 
@@ -294,6 +333,11 @@ def publish(ctx, config: Config):
 # --- docs --------------------------------------------------------------------
 
 def docs(ctx, config: Config):
+    if ctx.early:
+        # The public README would describe what is not public yet; promote
+        # mirrors it once the release is.
+        ctx.say("   early access: the public README follows when it goes public")
+        return
     if not config.readme:
         ctx.say("   no [docs] in vulturif.toml, nothing to mirror")
         return
@@ -364,7 +408,52 @@ def sync(ctx, config: Config):
                 "own sync (every 30 minutes)")
     if ctx.dry_run:
         return
+    if ctx.early:
+        # The public answer does not change, and the early one needs a
+        # supporter key: there is nothing to check it against here.
+        ctx.say("   early access: supporters get it once the site has synced")
+        return
     verify_site(ctx, config, wait=config.wait)
+
+
+# --- promote -----------------------------------------------------------------
+
+def promote(ctx, config: Config):
+    """An early-access release goes public, nothing rebuilt.
+
+    dist/ holds that release's files as downloaded from the source repo,
+    SHA256SUMS and its signature included. They are checked against each
+    other and the pinned keys first, so the public release can only be
+    exactly what supporters already have; then publish, docs and sync run
+    as for any release.
+    """
+    if ctx.early:
+        raise StepError("promote makes an early release public; --early makes no sense")
+    if ctx.ci:
+        _check_ci_tag(config)
+    sums, sig = config.dist / SUMS, config.dist / SIG
+    if not (sums.is_file() and sig.is_file()):
+        raise StepError(f"no {SUMS} and {SIG} in {config.dist} — download the early "
+                        f"release first (gh release download {config.tag} --repo "
+                        f"{config.source_repo or '<source repo>'} --dir {config.dist.name})")
+    try:
+        signed = signature.signed_hashes(
+            {"version": config.tag, "manifest": sums.read_text(encoding="utf-8"),
+             "signature": sig.read_text(encoding="utf-8").strip()},
+            config.app, ctx.public_keys)
+    except signature.BadSignature as e:
+        raise StepError(f"the early release's {SUMS} does not check out: {e}") from None
+    if signed is None:
+        raise StepError("no pinned key to check the early release against")
+    for path in config.released_files():
+        if not path.is_file():
+            raise StepError(f"the early release has no {path.name}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != signed.get(path.name):
+            raise StepError(f"{path.name} is not the file the early release signed")
+    ctx.say(f"   {config.tag}: {len(signed)} file(s) match the signed manifest")
+    for step in (publish, docs, sync):
+        ctx.say(f"==> {step.__name__}")
+        step(ctx, config)
 
 
 def verify_site(ctx, config: Config, wait: int = 0, interval: int = 15):
