@@ -222,3 +222,15 @@ def test_app_wires_the_license_store(tmp_path, monkeypatch):
 def test_the_pinned_license_key_is_not_an_update_key():
     assert LICENSE_PUBLIC_KEYS
     assert not set(LICENSE_PUBLIC_KEYS) & set(PUBLIC_KEYS)
+
+
+def test_check_update_renews_then_asks_with_the_key(tmp_path, keys, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    kit = App("Demo", "1.0.0", license_keys=keys.public)
+    kit.license.set(make_key(keys))
+    calls = []
+    monkeypatch.setattr(kit.license, "refresh_if_due", lambda: calls.append("refresh"))
+    monkeypatch.setattr(kit.updater, "check",
+                        lambda channel=None, license=None: calls.append(("check", license.supporter)))
+    kit.check_update()
+    assert calls == ["refresh", ("check", 42)]

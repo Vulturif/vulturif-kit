@@ -82,7 +82,11 @@ class App:
                             user_agent=f"{self.name}/{self.version}")
 
     def check_update(self, channel: str | None = None) -> "Update | None":
-        """updater.check() with the supporter key, if there is a valid one."""
+        """Renew the supporter key if it is due, then updater.check() with it.
+
+        The whole update check of an app in one call; on a worker thread, it
+        blocks on the network. Without a valid key it is the public check."""
+        self.license.refresh_if_due()
         return self.updater.check(channel, self.license.current())
 
     @cached_property

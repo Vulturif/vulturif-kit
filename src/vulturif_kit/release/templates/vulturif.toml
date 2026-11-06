@@ -2,7 +2,10 @@
 app = "{app}"
 slug = "{slug}"
 version_file = "version.py"
-release_repo = "Vulturif/{app}"
+release_repo = "Vulturif/{app}"                  # PUBLIC: what vulturif.com syncs
+# source_repo = "Vulturif/{app}-src"             # PRIVATE, this repo: early-access
+#                                                # releases (`--early`); in CI it is
+#                                                # the repo the workflow runs in
 
 [build]
 spec = "{app}.spec"
