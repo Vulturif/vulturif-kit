@@ -19,6 +19,7 @@ day = kit.analytics.mark_day(settings.get("usage_stats_day"))
 if day: settings["usage_stats_day"] = day
 
 update = kit.updater.check()               # worker thread; None or an Update
+update = kit.check_update()                # the same, early access with a supporter key
 kit.updater.apply(update, on_progress)     # worker thread; swap on next start
 
 kit.errors.send(description, contact)      # after the user pressed Send
@@ -34,6 +35,7 @@ creds = kit.credentials(CREDENTIAL_FIELDS)          # .env seeds the first run o
 | `errorreport.py` | in-memory errors, scrubbed, sent on Send | both |
 | `securestore.py` | DPAPI JSON files, entropy per app | Goonwall |
 | `credentials.py` | credential fields, DPAPI, .env as first-run seed | Leashware |
+| `license.py` | supporter keys: offline check, renewal, early-access channel | new |
 
 Endpoints follow from the slug: `/api/<slug>/latest/`, `/collect/<slug>/`,
 `/report/<slug>/` on vulturif.com. `PUBLIC_KEYS` (app.py) are the keys an

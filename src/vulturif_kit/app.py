@@ -19,6 +19,7 @@ from pathlib import Path
 from .analytics import Analytics
 from .credentials import CredentialStore
 from .errorreport import ErrorReporter
+from .license import LicenseStore
 from .securestore import SecureStore
 from .updater import Updater
 
@@ -39,12 +40,20 @@ PUBLIC_KEYS = (
     "q4Hydg6++n6jwG6OQr94Q+ForxIOiseyGlpLcjUfx2Q=",    # new, from 2026-10-31
     "jtJ0ZoBR2HTQ+1w2larK2ALUSZHAeSN/W1MGdMSnPXs=",    # old, to be dropped
 )
+# The keys supporter keys may be signed with (license.py). Their private half
+# is LICENSE_SIGNING_KEY on vulturif.com, from its scripts/make_license_key.py:
+# the site issues the keys, so unlike the update key it has to hold it. Never
+# the same pair as PUBLIC_KEYS. Empty: this build takes no supporter keys.
+LICENSE_PUBLIC_KEYS = (
+    "RQE+gtI2NqoNMHT7TVjpZFp8wX5x8vB1QLTU01LWDwg=",    # from 2026-11-06
+)
 
 
 class App:
     def __init__(self, name: str, version: str, slug: str | None = None,
                  assets=None, site: str = SITE, public_keys=PUBLIC_KEYS,
-                 require_signature: bool = True, data_dir_name: str | None = None):
+                 require_signature: bool = True, data_dir_name: str | None = None,
+                 license_keys=None):
         self.name = name
         self.version = version
         self.slug = slug or name.lower()
@@ -53,6 +62,7 @@ class App:
         self.public_keys = public_keys
         self.require_signature = require_signature
         self.data_dir_name = data_dir_name or name
+        self.license_keys = LICENSE_PUBLIC_KEYS if license_keys is None else license_keys
 
     def url(self, kind: str) -> str:
         return f"{self.site}/{kind}/{self.slug}/"
@@ -61,6 +71,19 @@ class App:
     def updater(self) -> Updater:
         return Updater(self.name, self.version, f"{self.site}/api/{self.slug}/latest/",
                        self.public_keys, self.assets, self.require_signature)
+
+    @cached_property
+    def license(self) -> LicenseStore:
+        """The supporter key, in <data dir>\\license.dat. The same key works in
+        every app; each keeps its own copy."""
+        return LicenseStore(self.name, self.data_dir / "license.dat", self.license_keys,
+                            f"{self.site}/api/license/refresh/",
+                            self.store(f"{self.name}/license/1".encode()),
+                            user_agent=f"{self.name}/{self.version}")
+
+    def check_update(self, channel: str | None = None) -> "Update | None":
+        """updater.check() with the supporter key, if there is a valid one."""
+        return self.updater.check(channel, self.license.current())
 
     @cached_property
     def analytics(self) -> Analytics:

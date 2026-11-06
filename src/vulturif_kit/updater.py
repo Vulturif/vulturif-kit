@@ -37,7 +37,7 @@ import hashlib
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import signature
@@ -59,6 +59,11 @@ class Update:
     version: str        # "1.2.0", without the "v"
     notes: str          # the tag message
     assets: tuple       # Asset, main exe first
+    # Early access (a supporter key, license.py): when everyone gets it, as
+    # the site's ISO timestamp; None for a public release.
+    public_at: str | None = None
+    # The supporter key an early-access download has to show; never printed.
+    auth: str = field(default="", repr=False, compare=False)
 
     @property
     def size(self) -> int:
@@ -146,21 +151,40 @@ class Updater:
         return Update(version.lstrip("v"), (release.get("notes") or "").strip(),
                       assets)
 
-    def check(self, channel: str | None = None) -> Update | None:
+    def check(self, channel: str | None = None, license=None) -> Update | None:
         """Ask vulturif.com whether there is something newer. Blocks on the
         network: call it from a worker. Raises when the question could not be
-        asked. `channel="beta"` counts pre-releases too."""
+        asked. `channel="beta"` counts pre-releases too.
+
+        With a `license` (license.License) that unlocks early access here, it
+        asks the early channel instead; the site answers with the public
+        release when it does not take the key, so a lapsed key just means the
+        normal updates again."""
         if not can_update():
             return None
         self.cleanup()
+        return self.ask(channel, license)
+
+    def ask(self, channel: str | None = None, license=None) -> Update | None:
+        """check() without the frozen-exe gate and the cleanup."""
         import requests
-        r = requests.get(self.latest_url, headers=self.headers, timeout=TIMEOUT,
-                         params={"channel": channel} if channel else None)
+        headers = dict(self.headers)
+        params = {"channel": channel} if channel else None
+        early = license is not None and license.allows(self.app)
+        if early:
+            headers["Authorization"] = f"Bearer {license.key}"
+            params = {"channel": "early"}
+        r = requests.get(self.latest_url, headers=headers, timeout=TIMEOUT, params=params)
         r.raise_for_status()
-        return self.newer(r.json())
+        release = r.json()
+        update = self.newer(release)
+        if update is not None and early and release.get("public_at"):
+            # Only an early-access file needs the key; a public one never sees it.
+            update = replace(update, public_at=release["public_at"], auth=license.key)
+        return update
 
     def download(self, asset: Asset, dest: Path, on_progress=None,
-                 offset: int = 0, total: int = 0, stop=None):
+                 offset: int = 0, total: int = 0, stop=None, auth: str = ""):
         """Stream one asset to `dest`, by way of a `.part` that only takes the
         name once size and hash both match — a broken download must never be
         mistaken for a build. `on_progress(done, total)` counts across all the
@@ -170,8 +194,11 @@ class Updater:
         part = Path(str(dest) + ".part")
         hasher = hashlib.sha256()
         done = 0
+        headers = dict(self.headers)
+        if auth:
+            headers["Authorization"] = f"Bearer {auth}"
         with requests.get(asset.url, stream=True, timeout=60,
-                          headers=self.headers) as r:
+                          headers=headers) as r:
             r.raise_for_status()
             kind = r.headers.get("Content-Type", "")
             if "html" in kind:
@@ -210,7 +237,8 @@ class Updater:
         offset = 0
         for asset in update.assets:
             new = Path(str(where[asset.name]) + ".new")
-            self.download(asset, new, on_progress, offset, update.size, stop)
+            self.download(asset, new, on_progress, offset, update.size, stop,
+                          auth=update.auth)
             offset += asset.size
             pairs.append((new, where[asset.name]))
         swap(pairs)
