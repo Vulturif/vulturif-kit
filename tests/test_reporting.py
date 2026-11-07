@@ -5,7 +5,7 @@ import pytest
 
 from vulturif_kit import analytics as an
 from vulturif_kit.analytics import Analytics
-from vulturif_kit.errorreport import ErrorReporter, scrub
+from vulturif_kit.errorreport import KINDS, ErrorReporter, scrub
 
 
 @pytest.fixture
@@ -91,3 +91,40 @@ def test_send_raises_on_429(monkeypatch):
     monkeypatch.setattr(requests, "post", lambda *a, **kw: R())
     with pytest.raises(OSError, match="too many"):
         ErrorReporter("Demo", "1", "https://x/").send("hi")
+
+
+def test_feedback_kinds_and_payload_keys():
+    errors = ErrorReporter("Demo", "1.0.0", "https://x/report/demo/")
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        errors.record()
+    assert list(KINDS) == ["bug", "question", "idea"]
+    assert [KINDS[k] for k in KINDS] == ["Problem", "Question", "Idea"]
+    bug = errors.payload("it broke")
+    assert set(bug) == {"v", "os", "kind", "description", "details", "contact"}
+    assert bug["kind"] == "bug" and "boom" in bug["details"]
+    for kind in ("question", "idea"):
+        p = errors.payload("how?", "me@x", include_details=True, kind=kind)
+        assert p["kind"] == kind and p["details"] == "" and p["contact"] == "me@x"
+    with pytest.raises(ValueError):
+        errors.payload("x", kind="praise")
+
+
+def test_send_posts_kind(monkeypatch):
+    import requests
+    sent = []
+
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(requests, "post",
+                        lambda url, json, **kw: sent.append((url, json)) or R())
+    errors = ErrorReporter("Demo", "1", "https://x/report/demo/")
+    errors.send("old call")                 # how the apps call it today
+    errors.send("idea", "", True, "idea")
+    assert [j["kind"] for _, j in sent] == ["bug", "idea"]
+    assert sent[1][0] == "https://x/report/demo/"

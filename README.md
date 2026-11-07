@@ -28,7 +28,7 @@ kit.license.load()                         # the stored key (License), expired o
 kit.license.set(text)                      # check and keep a pasted key; BadLicense if not one
 kit.license.clear()
 
-kit.errors.send(description, contact)      # after the user pressed Send
+kit.errors.send(description, contact, include_details, kind="question")  # after Send
 store = kit.store(b"VideoSelector/securestore/1")   # keep the app's old entropy!
 creds = kit.credentials(CREDENTIAL_FIELDS)          # .env seeds the first run only
 ```
@@ -38,7 +38,7 @@ creds = kit.credentials(CREDENTIAL_FIELDS)          # .env seeds the first run o
 | `updater.py` | check, download, all-or-nothing swap, `strip_bootloader_env` | Goonwall (multi-file) |
 | `signature.py` | Ed25519 verify in plain Python, SHA256SUMS write + read | both, identical |
 | `analytics.py` | opt-in counts, no id of any kind, batched | Goonwall |
-| `errorreport.py` | in-memory errors, scrubbed, sent on Send | both |
+| `errorreport.py` | feedback (problem/question/idea); in-memory errors, scrubbed, sent on Send | both |
 | `securestore.py` | DPAPI JSON files, entropy per app | Goonwall |
 | `credentials.py` | credential fields, DPAPI, .env as first-run seed | Leashware |
 | `license.py` | supporter keys: offline check, renewal, early-access channel | new |
@@ -48,6 +48,16 @@ Endpoints follow from the slug: `/api/<slug>/latest/`, `/collect/<slug>/`,
 update may be signed with — while the signing key changes, the new one and
 the old one; the comment there has the steps. `vkit sign` refuses a key that
 belongs to none of them.
+
+**Feedback** (`errorreport.py`): the app's menu entry and dialog are "Send
+feedback…", with a choice of Problem / Question / Idea — `KINDS` maps what is
+sent as `"kind"` (`bug`, `question`, `idea`) to those labels. The payload is
+`v`, `os`, `kind`, `description`, `details`, `contact`; `details` (the recent
+errors, with the "Include technical details" tick) goes with a Problem only,
+so the dialog offers the tick only while Problem is picked. `kind` defaults to
+`bug`, and vulturif.com stores a missing or unknown kind as a bug, so an app
+that does not send one yet keeps working. Reports land in the site's admin
+under Feedback, filterable by kind and by source (app or website).
 
 **Supporter keys** (`license.py`): vulturif.com gives supporters a key
 (`VLT1-…`) that the app checks offline against `LICENSE_PUBLIC_KEYS` and keeps
@@ -145,8 +155,9 @@ and Goonwall are the worked examples; copy from them.
    "How to get a key" linking to `https://vulturif.com/supporter/`.
 5. The update question: one line when `update.public_at` is set ("Early
    access — everyone else gets it on …").
-6. Error reports and stats as the other apps do (`APP.errors`, `APP.analytics`,
-   opt-in, off by default).
+6. "Send feedback…" (Problem / Question / Idea, `APP.errors.send(..., kind=)`)
+   and stats as the other apps do (`APP.errors`, `APP.analytics`, opt-in, off
+   by default).
 7. `vkit init --workflow`: `vulturif.toml`, `release.yml`, `promote.yml`. In
    release.yml keep the "The app imports" step pointed at the modules that use
    the kit.

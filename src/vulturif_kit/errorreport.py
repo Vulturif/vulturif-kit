@@ -1,9 +1,14 @@
-"""Error reports to vulturif.com, for the app's "Send error report…".
+"""Feedback to vulturif.com, for the app's "Send feedback…".
+
+One dialog takes all three kinds (`KINDS`): a Problem (`bug`), a Question
+(`question`) or an Idea (`idea`), sent as `"kind"`. The site stores a missing
+or unknown kind as a bug, so older apps that never send it keep working.
 
 Nothing leaves without the person pressing Send in the app's dialog, which
-should show exactly what goes: what they typed, a way to reach them if they
-want an answer, the version and "Windows 11", and — only if they leave it
-ticked — the last few errors this run recorded (`details()`).
+should show exactly what goes: the kind, what they typed, a way to reach them
+if they want an answer, the version and "Windows 11", and — for a Problem
+only, and only if they leave it ticked — the last few errors this run
+recorded (`details()`). A question or an idea never carries them.
 
 Errors are recorded in memory only, never written to disk, and gone at quit:
 uncaught exceptions on any thread (the hooks `install()` sets, called from
@@ -29,6 +34,10 @@ from collections import deque
 TIMEOUT = 20
 KEEP = 10               # errors kept, newest last
 MAX_DETAILS = 30_000    # characters sent; the site keeps 40 000
+
+# What is sent as "kind" -> the dialog's label, in the dialog's order.
+KINDS = {"bug": "Problem", "question": "Question", "idea": "Idea"}
+BUG = "bug"
 
 
 def os_name() -> str:
@@ -80,20 +89,25 @@ class ErrorReporter:
         return scrub(text)[-MAX_DETAILS:]
 
     def payload(self, description: str, contact: str = "",
-                include_details: bool = True) -> dict:
-        """Exactly what `send` posts — for the dialog to show beforehand."""
-        return {"v": self.version, "os": os_name(),
+                include_details: bool = True, kind: str = BUG) -> dict:
+        """Exactly what `send` posts — for the dialog to show beforehand.
+        `kind` is a key of KINDS; the recorded errors go with a bug only."""
+        if kind not in KINDS:
+            raise ValueError(f"unknown feedback kind {kind!r}")
+        return {"v": self.version, "os": os_name(), "kind": kind,
                 "description": description.strip(),
-                "details": self.details() if include_details else "",
+                "details": (self.details()
+                            if include_details and kind == BUG else ""),
                 "contact": contact.strip()}
 
     def send(self, description: str, contact: str = "",
-             include_details: bool = True):
+             include_details: bool = True, kind: str = BUG):
         """Post one report. Blocks on the network: call it from a worker.
         Raises when it did not arrive."""
         import requests
         r = requests.post(self.endpoint,
-                          json=self.payload(description, contact, include_details),
+                          json=self.payload(description, contact,
+                                            include_details, kind),
                           headers={"User-Agent": f"{self.app}/{self.version}"},
                           timeout=TIMEOUT)
         if r.status_code == 429:
