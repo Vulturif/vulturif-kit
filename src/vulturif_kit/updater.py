@@ -12,11 +12,15 @@ How an update lands, across two launches:
 2. `apply()` downloads the new files next to the running ones, checks each
    one's size and SHA-256, and only then swaps them in by renaming. A signed
    release's hashes are the ones in its signed SHA256SUMS (signature.py), so
-   a file swapped on the site is refused. Windows locks a running exe against
-   writing and deleting but lets it be renamed: the running file becomes
-   `….exe.old`, the download takes its name, and the process carries on
+   a file swapped on the site is refused. The running file becomes
+   `….old`, the download takes its name, and the process carries on
    undisturbed. The new build is what starts next time — or straight away,
-   if the app restarts into it.
+   if the app restarts into it. Renaming the running file works on both
+   Windows and Linux: Windows locks a running exe against writing and
+   deleting but still lets it be renamed, and on Linux a running ELF (or
+   AppImage) keeps executing from its already-open file description even
+   after its on-disk path is replaced, so the swap-by-rename is safe either
+   way.
 3. `check()` on the next start deletes the `.old` files.
 
 An app may ship more than one file (Goonwall's GoonwallHost.exe). The first
@@ -77,9 +81,11 @@ def number(tag: str) -> tuple:
 
 
 def can_update() -> bool:
-    """Only the built exe updates itself — a checkout is updated by git, and
-    `sys.executable` there is the venv's Python."""
-    return bool(getattr(sys, "frozen", False)) and sys.platform == "win32"
+    """Only the built app updates itself — a checkout is updated by git, and
+    `sys.executable` there is the venv's Python. Windows and Linux builds
+    both self-update by the rename-into-place trick (see `swap`); other
+    platforms only check, never swap, so they stay inert."""
+    return bool(getattr(sys, "frozen", False)) and sys.platform in ("win32", "linux")
 
 
 class Updater:
@@ -250,6 +256,13 @@ def swap(pairs):
 
     All or nothing: when one rename fails, everything already swapped is put
     back, so the app is never left half one version and half the next.
+
+    Renaming over the running build is what makes this safe while the app is
+    live. On Windows the exe is locked against writing and deleting but may
+    still be renamed; on Linux the kernel keeps the running file alive through
+    its open file description after the path is replaced. Either way the
+    process keeps running from the old file and the new one is picked up on
+    the next start.
     """
     done = []
     try:

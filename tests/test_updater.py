@@ -1,12 +1,13 @@
 import base64
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
 
 from conftest import signed_release
 from vulturif_kit import App, BadSignature, signature
-from vulturif_kit.updater import Asset, Update, Updater, number, swap
+from vulturif_kit.updater import Asset, Update, Updater, can_update, number, swap
 
 
 def updater(keys, assets=("Demo.exe",), require=True):
@@ -30,6 +31,25 @@ def test_manifest_round_trip(tmp_path, keys):
     release = {"version": "v1.2.0", "manifest": text, "signature": keys.sign(text)}
     assert signature.signed_hashes(release, "Demo", keys.public) == {
         "Demo.exe": hashlib.sha256(b"build").hexdigest()}
+
+
+@pytest.mark.parametrize("platform, expected", [
+    ("win32", True),
+    ("linux", True),
+    ("darwin", False),    # unsupported OS: checks are inert, no swap
+])
+def test_can_update_frozen_on_supported_platforms(monkeypatch, platform, expected):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", platform)
+    assert can_update() is expected
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_can_update_is_false_in_a_checkout(monkeypatch, platform):
+    # Not frozen: a source checkout is updated by git, never by itself.
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "platform", platform)
+    assert can_update() is False
 
 
 def test_signed_release_takes_hashes_from_the_manifest(keys):
