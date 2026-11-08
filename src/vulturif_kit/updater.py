@@ -107,8 +107,17 @@ class Updater:
         return self.assets[0]
 
     def targets(self, exe=None) -> dict:
-        """Asset name -> the file it replaces."""
-        exe = Path(exe or sys.executable)
+        """Asset name -> the file it replaces.
+
+        Running as an AppImage, `sys.executable` is the launcher inside the
+        read-only squashfs mount, not the .AppImage the user started — writing
+        there would fail. The AppImage runtime sets $APPIMAGE to that real
+        file, so the main asset is swapped there instead. $APPIMAGE is unset on
+        Windows and on a non-AppImage run, where the target stays
+        `sys.executable`. An explicit `exe=` wins over both."""
+        if exe is None:
+            exe = os.environ.get("APPIMAGE") or sys.executable
+        exe = Path(exe)
         return {name: exe if i == 0 else exe.with_name(name)
                 for i, name in enumerate(self.assets)}
 
@@ -242,13 +251,32 @@ class Updater:
         pairs = []
         offset = 0
         for asset in update.assets:
-            new = Path(str(where[asset.name]) + ".new")
+            target = where[asset.name]
+            new = Path(str(target) + ".new")
             self.download(asset, new, on_progress, offset, update.size, stop,
                           auth=update.auth)
+            _carry_mode(new, target)
             offset += asset.size
-            pairs.append((new, where[asset.name]))
+            pairs.append((new, target))
         swap(pairs)
         return update.version
+
+
+def _carry_mode(new: Path, target: Path):
+    """Give the freshly downloaded file the permissions of the one it replaces.
+
+    An HTTP download lands as 0644, but a Linux AppImage must keep its execute
+    bit or it will not launch after the swap, so the current build's mode is
+    copied onto the download. POSIX-only, hence a no-op on Windows, where the
+    execute bit has no meaning. With nothing to replace yet (a brand-new side
+    asset), an .AppImage is made executable outright."""
+    if os.name != "posix":
+        return
+    try:
+        os.chmod(new, os.stat(target).st_mode & 0o7777)
+    except FileNotFoundError:
+        if target.name.endswith(".AppImage"):
+            os.chmod(new, 0o755)
 
 
 def swap(pairs):

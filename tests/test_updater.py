@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -154,6 +155,46 @@ def test_apply_downloads_checks_and_swaps(tmp_path, keys, monkeypatch):
                         lambda *a, **kw: FakeResponse(b"<html>", "text/html"))
     with pytest.raises(OSError, match="text/html"):
         updater(keys).apply(good, exe=exe)
+
+
+def test_targets_follow_the_appimage_env(tmp_path, keys, monkeypatch):
+    # In an AppImage, sys.executable is the launcher inside the read-only
+    # mount; the swap must land on the real .AppImage that $APPIMAGE points to.
+    appimage = tmp_path / "Demo-x86_64.AppImage"
+    monkeypatch.setenv("APPIMAGE", str(appimage))
+    where = updater(keys, assets=("Demo-x86_64.AppImage",)).targets()
+    assert where == {"Demo-x86_64.AppImage": appimage}
+
+
+def test_targets_fall_back_to_sys_executable(tmp_path, keys, monkeypatch):
+    # No AppImage (every Windows run, a non-AppImage Linux build): sys.executable.
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Demo.exe"))
+    assert updater(keys).targets() == {"Demo.exe": tmp_path / "Demo.exe"}
+
+
+def test_explicit_exe_wins_over_appimage_env(tmp_path, keys, monkeypatch):
+    monkeypatch.setenv("APPIMAGE", str(tmp_path / "from-env.AppImage"))
+    exe = tmp_path / "chosen.exe"
+    assert updater(keys).targets(exe) == {"Demo.exe": exe}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the execute bit is POSIX-only")
+def test_swapped_appimage_stays_executable(tmp_path, keys, monkeypatch):
+    # A download lands 0644; the swapped-in AppImage must stay executable or it
+    # will not launch next time.
+    import requests
+    body = b"new appimage"
+    appimage = tmp_path / "Demo-x86_64.AppImage"
+    appimage.write_bytes(b"old appimage")
+    appimage.chmod(0o755)
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: FakeResponse(body))
+    up = Update("1.2.0", "", (Asset("Demo-x86_64.AppImage", "u", len(body),
+                                    hashlib.sha256(body).hexdigest()),))
+    assert updater(keys, assets=("Demo-x86_64.AppImage",)).apply(
+        up, exe=appimage) == "1.2.0"
+    assert appimage.read_bytes() == body
+    assert os.access(appimage, os.X_OK)
 
 
 def test_app_wires_the_endpoints():
