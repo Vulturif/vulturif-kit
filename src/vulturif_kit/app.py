@@ -17,6 +17,7 @@ from functools import cached_property
 from pathlib import Path
 
 from .analytics import Analytics
+from .assets import Downloader
 from .credentials import CredentialStore
 from .errorreport import ErrorReporter
 from .license import LicenseStore
@@ -88,6 +89,14 @@ class App:
         blocks on the network. Without a valid key it is the public check."""
         self.license.refresh_if_due()
         return self.updater.check(channel, self.license.current())
+
+    @cached_property
+    def downloads(self) -> Downloader:
+        """Fetch optional add-ons the app pins by hash (assets.py). The model
+        behind a bundled neural voice, say — too big to ship in every build,
+        wanted by only some, so downloaded on demand and checked against a hash
+        baked into this signed exe."""
+        return Downloader(user_agent=f"{self.name}/{self.version}")
 
     @cached_property
     def analytics(self) -> Analytics:

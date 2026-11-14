@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vulturif-kit"
-version = "0.5.0"
-description = "What every Vulturif app shares: updater, signed releases, opt-in stats, error reports, encrypted credentials — and the release CLI."
+version = "0.7.0"
+description = "What every Vulturif app shares: updater, signed releases, pinned add-on downloads, opt-in stats, error reports, encrypted credentials — and the release CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["requests>=2.31"]

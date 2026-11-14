@@ -19,11 +19,13 @@ The release side (build, sign, GitHub release, vulturif.com sync) is the
 """
 
 from .app import LICENSE_PUBLIC_KEYS, PUBLIC_KEYS, SITE, App
+from .assets import BadDownload, Download, Downloader
 from .license import BadLicense, License
 from .signature import BadSignature
 from .updater import Asset, Update
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
-__all__ = ["App", "Asset", "BadLicense", "BadSignature", "License", "LICENSE_PUBLIC_KEYS",
-           "PUBLIC_KEYS", "SITE", "Update", "__version__"]
+__all__ = ["App", "Asset", "BadDownload", "BadLicense", "BadSignature", "Download",
+           "Downloader", "License", "LICENSE_PUBLIC_KEYS", "PUBLIC_KEYS", "SITE",
+           "Update", "__version__"]
