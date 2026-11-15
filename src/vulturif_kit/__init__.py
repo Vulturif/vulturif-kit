@@ -13,7 +13,8 @@ rather than imported from a version.py next to them:
     kit.analytics.start(settings.get("usage_stats", False))
     update = kit.updater.check()          # on a worker
 
-Everything here is Qt-free and leaves the asking to the app's own dialogs.
+Everything here is Qt-free and leaves the asking to the app's own dialogs
+(themes_qt, the one Qt helper, imports PySide6 only when called).
 The release side (build, sign, GitHub release, vulturif.com sync) is the
 `vkit` command in vulturif_kit.release, which the exe never imports.
 """
@@ -24,7 +25,7 @@ from .license import BadLicense, License
 from .signature import BadSignature
 from .updater import Asset, Update
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = ["App", "Asset", "BadDownload", "BadLicense", "BadSignature", "Download",
            "Downloader", "License", "LICENSE_PUBLIC_KEYS", "PUBLIC_KEYS", "SITE",

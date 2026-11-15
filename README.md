@@ -42,6 +42,8 @@ creds = kit.credentials(CREDENTIAL_FIELDS)          # .env seeds the first run o
 | `securestore.py` | DPAPI JSON files, entropy per app | Goonwall |
 | `credentials.py` | credential fields, DPAPI, .env as first-run seed | Leashware |
 | `license.py` | supporter keys: offline check, renewal, early-access channel | new |
+| `themes.py` | the shared palettes (Night City + five more) and switching | Tetherware |
+| `themes_qt.py` | the View → Theme menu and the installed-font pick (PySide6, imported lazily) | Tetherware |
 
 Endpoints follow from the slug: `/api/<slug>/latest/`, `/collect/<slug>/`,
 `/report/<slug>/` on vulturif.com. `PUBLIC_KEYS` (app.py) are the keys an
@@ -68,6 +70,20 @@ The app needs a place to paste the key (a field or a small dialog saying
 valid until …, ran out on …, or how to get one with a link to
 `https://vulturif.com/supporter/`; Goonwall's `ui_qt/dialogs/supporter.py`) and one line in its update
 question when `update.public_at` is set.
+
+**Themes** (`themes.py`, `themes_qt.py`): the colours live here, the rules
+stay in each app. The app's `theme.py` keeps its own `qss()` and binds the
+tokens with `apply(theme_id) -> themes.apply(globals(), theme_id)`, called
+once at import with `themes.DEFAULT` and again before the window is built
+with the saved setting (`themes.SETTINGS_KEY`, `"theme"`). Write corners as
+`RADIUS_CARD` / `RADIUS_CTRL` / `RADIUS_MID` / `RADIUS_SMALL` and the primary
+button as `ACCENT_FILL` / `ACCENT_FILL_HOVER`, so every palette's shape comes
+through; Night City's values reproduce the old stylesheet exactly. The View
+menu gets `themes_qt.add_theme_menu(menu, T.THEME, on_pick)`; on a pick the
+app calls `T.apply`, saves the setting, `themes_qt.restyle(T.qss())`, re-tints
+its title bar (`IS_DARK` picks light or dark caption buttons) and redraws
+whatever it painted from a token at build time. Read tokens as `T.NAME` at
+paint or build time, never copy them into a module-level constant.
 
 **Compatibility to keep when porting:** Goonwall's store entropy is
 `b"VideoSelector/securestore/1"`; Leashware's credentials live in
