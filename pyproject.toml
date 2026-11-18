@@ -13,6 +13,9 @@ dependencies = ["requests>=2.31"]
 [project.optional-dependencies]
 # Only the machine that releases needs these, never the exe.
 release = ["cryptography>=42"]
+# The local media tagger. ONNX only — never torch — so the add-on stays small
+# and CPU-friendly. An app that wants it pins vulturif-kit[tagging]@vX.Y.Z.
+tagging = ["onnxruntime>=1.17", "numpy>=1.24", "Pillow>=10"]
 dev = ["pytest>=8", "cryptography>=42"]
 
 [project.scripts]
