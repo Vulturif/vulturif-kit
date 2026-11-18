@@ -44,6 +44,7 @@ creds = kit.credentials(CREDENTIAL_FIELDS)          # .env seeds the first run o
 | `license.py` | supporter keys: offline check, renewal, early-access channel | new |
 | `themes.py` | the shared palettes (Night City + five more) and switching | Tetherware |
 | `themes_qt.py` | the View → Theme menu and the installed-font pick (PySide6, imported lazily) | Tetherware |
+| `tagging/` | the `[tagging]` extra: WD14 ONNX tagger, SQLite tag index, rule34 query parser — all lazy, Qt-free | new |
 
 Endpoints follow from the slug: `/api/<slug>/latest/`, `/collect/<slug>/`,
 `/report/<slug>/` on vulturif.com. `PUBLIC_KEYS` (app.py) are the keys an
@@ -84,6 +85,17 @@ app calls `T.apply`, saves the setting, `themes_qt.restyle(T.qss())`, re-tints
 its title bar (`IS_DARK` picks light or dark caption buttons) and redraws
 whatever it painted from a token at build time. Read tokens as `T.NAME` at
 paint or build time, never copy them into a module-level constant.
+
+**Local tagging** (`tagging/`, the `vulturif-kit[tagging]` extra): an optional
+add-on for auto-tagging a local image library and filtering it with the same
+rule34 syntax the booru search uses. `tagging.query` parses a query once and
+either evaluates it against an image's tags or renders it to a booru dialect;
+`tagging.TagIndex` is a SQLite index that scans folders incrementally (unchanged
+files are skipped, hand corrections survive a re-scan); `tagging.Tagger` runs a
+WD14 model through onnxruntime. The heavy deps (`onnxruntime`, `numpy`,
+`Pillow`) are imported only when the tagger actually runs, so
+`import vulturif_kit` stays as light as ever — an app opts in by pinning
+`vulturif-kit[tagging]@vX.Y.Z`.
 
 **Compatibility to keep when porting:** Goonwall's store entropy is
 `b"VideoSelector/securestore/1"`; Leashware's credentials live in
