@@ -184,6 +184,36 @@ def test_concurrent_query_during_scan(tmp_path):
     idx.close()
 
 
+def _mk(default=(("solo", 0.9), ("rating:explicit", 0.7))):
+    return StubTagger(default=default)
+
+
+def test_parallel_scan_matches_sequential(tmp_path):
+    for i in range(12):
+        _img(tmp_path, f"{i}.jpg", data=f"pixels-{i}".encode())
+    with TagIndex(tmp_path / "seq.db") as a:
+        sa = a.scan(tmp_path, _mk())
+    with TagIndex(tmp_path / "par.db") as b:
+        sb = b.scan(tmp_path, _mk(), workers=4, make_tagger=_mk)   # own tagger per worker
+    assert sa.tagged == 12 and sb.tagged == 12
+    with TagIndex(tmp_path / "par.db") as b:
+        assert b.count() == 12
+        assert sorted(os.path.basename(p) for p in b.query("solo")) == \
+               sorted(os.path.basename(p) for p in TagIndex(tmp_path / "seq.db").query("solo"))
+
+
+def test_parallel_rescan_skips_and_keeps_manual(tmp_path):
+    for i in range(6):
+        _img(tmp_path, f"{i}.jpg", data=f"pixels-{i}".encode())
+    p0 = tmp_path / "0.jpg"
+    with TagIndex(tmp_path / "x.db") as idx:
+        idx.scan(tmp_path, _mk(), workers=3)
+        idx.set_manual(p0, "keeper", True)
+        stats = idx.scan(tmp_path, _mk(), workers=3)         # nothing changed
+        assert stats.skipped == 6 and stats.tagged == 0
+        assert "keeper" in idx.tags_for(p0)
+
+
 def test_persists_to_disk(tmp_path):
     _img(tmp_path, "a.jpg")
     db = tmp_path / "data" / "tags.db"

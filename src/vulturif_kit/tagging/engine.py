@@ -100,10 +100,15 @@ class Tagger:
     """
 
     def __init__(self, model_dir, *, threshold: float = 0.35,
-                 providers=("CPUExecutionProvider",)):
+                 providers=("CPUExecutionProvider",), intra_op_threads: int = 0):
         self.model_dir = Path(model_dir)
         self.threshold = threshold
         self.providers = tuple(providers)
+        # Threads one inference may use. 0 = onnxruntime's default (all cores),
+        # best when tagging one image at a time; a scan that runs several Taggers
+        # in parallel sets this low (e.g. 1–2) so the sessions don't oversubscribe
+        # the cores and can actually run at once.
+        self.intra_op_threads = int(intra_op_threads)
         self._session = None
         self._labels = None
         self._size = None              # model's square input side, in pixels
@@ -123,8 +128,11 @@ class Tagger:
         if not model.is_file():
             raise FileNotFoundError(f"no {MODEL_FILE} in {self.model_dir}")
         self._labels = load_labels(self.model_dir / LABELS_FILE)
+        opts = onnxruntime.SessionOptions()
+        if self.intra_op_threads > 0:
+            opts.intra_op_num_threads = self.intra_op_threads
         self._session = onnxruntime.InferenceSession(
-            str(model), providers=list(self.providers))
+            str(model), sess_options=opts, providers=list(self.providers))
         # WD14 input is (1, H, W, 3) with H == W; the dim may be a string when
         # the model declares it dynamic, so fall back to the usual 448.
         shape = self._session.get_inputs()[0].shape

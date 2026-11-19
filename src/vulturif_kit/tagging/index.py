@@ -115,8 +115,8 @@ class TagIndex:
 
     # ── scanning ───────────────────────────────────────────────────────────
 
-    def scan(self, roots, tagger, *, exts=IMAGE_EXTS, prune=True,
-             on_progress=None, stop=None) -> ScanStats:
+    def scan(self, roots, tagger, *, workers=1, make_tagger=None,
+             exts=IMAGE_EXTS, prune=True, on_progress=None, stop=None) -> ScanStats:
         """Index every image under ``roots`` (a path or an iterable of paths),
         tagging new or changed files with ``tagger``.
 
@@ -124,6 +124,14 @@ class TagIndex:
         ``stop()`` is polled between files, so a closing window need not wait for
         a whole library. With ``prune`` on, rows for files that no longer exist
         **under the scanned roots** are deleted.
+
+        With ``workers`` > 1 the slow part — hashing and tagging — runs in a
+        thread pool while every database write stays on this thread (so the db
+        is single-writer and uncontended). ``make_tagger``, a zero-arg callable
+        returning a fresh :class:`~.engine.Tagger`, gives each worker its own
+        ONNX session so the inferences genuinely run at once; without it the one
+        ``tagger`` is shared across the pool (less speed-up, but still overlaps
+        hashing with inference).
         """
         if isinstance(roots, (str, os.PathLike)):
             roots = [roots]
@@ -132,24 +140,123 @@ class TagIndex:
         exts = frozenset(e.lower() for e in exts)
         seen_paths = set()
 
-        for path in self._walk(roots, exts):
-            if stop and stop():
-                stats.stopped = True
-                break
-            seen_paths.add(str(path))
-            stats.seen += 1
-            try:
-                self._index_one(path, tagger, stats)
-            except Exception:
-                stats.failed += 1
-            if on_progress:
-                on_progress(stats, path)
+        if workers and workers > 1:
+            self._scan_parallel(roots, exts, tagger, workers, make_tagger,
+                                stats, seen_paths, on_progress, stop)
+        else:
+            for path in self._walk(roots, exts):
+                if stop and stop():
+                    stats.stopped = True
+                    break
+                seen_paths.add(str(path))
+                stats.seen += 1
+                try:
+                    self._index_one(path, tagger, stats)
+                except Exception:
+                    stats.failed += 1
+                if on_progress:
+                    on_progress(stats, path)
 
         if prune and not stats.stopped:
             stats.removed = self._prune(roots, seen_paths)
         with self._lock:
             self.db.commit()
         return stats
+
+    def _scan_parallel(self, roots, exts, tagger, workers, make_tagger,
+                       stats, seen_paths, on_progress, stop):
+        """Hash + tag in a thread pool; keep every db write on this thread."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        tl = threading.local()
+
+        def worker_tagger():
+            tg = getattr(tl, "tg", None)
+            if tg is None:
+                tg = tl.tg = (make_tagger() if make_tagger else tagger)
+            return tg
+
+        def heavy(path, row):
+            # Pool thread: hash, then tag only if the bytes changed. No db here.
+            digest = _sha256(path)
+            if row is not None and row["hash"] == digest:
+                return digest, None                 # touched: same bytes
+            if stop and stop():
+                return digest, "stopped"
+            return digest, worker_tagger().tag(path)
+
+        pending = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for path in self._walk(roots, exts):
+                if stop and stop():
+                    stats.stopped = True
+                    break
+                seen_paths.add(str(path))
+                stats.seen += 1
+                st = path.stat()
+                with self._lock:
+                    row = self.db.execute(
+                        "SELECT id, hash, size, mtime FROM files WHERE path = ?",
+                        (str(path),)).fetchone()
+                # Fast path: unchanged → skip without hashing or a worker.
+                if row and row["size"] == st.st_size and row["mtime"] == st.st_mtime:
+                    stats.skipped += 1
+                    if on_progress:
+                        on_progress(stats, path)
+                    continue
+                pending.append((pool.submit(heavy, path, row), path, row))
+                # Keep at most ~2x workers in flight so a huge library is not all
+                # hashed into memory ahead of the single writer.
+                if len(pending) >= workers * 2:
+                    self._collect(pending.pop(0), stats, on_progress)
+            for item in pending:
+                self._collect(item, stats, on_progress)
+
+    def _collect(self, item, stats: ScanStats, on_progress):
+        fut, path, row = item
+        try:
+            digest, pairs = fut.result()
+        except Exception:
+            stats.failed += 1
+        else:
+            if pairs != "stopped":
+                self._write_result(path, row, digest, pairs, stats)
+        if on_progress:
+            on_progress(stats, path)
+
+    def _write_result(self, path, row, digest, pairs, stats: ScanStats):
+        """Write one worker's result to the db (this thread only)."""
+        st = path.stat()
+        now = time.time()
+        with self._lock:
+            if pairs is None:                       # touched: refresh stat, keep tags
+                self.db.execute(
+                    "UPDATE files SET size = ?, mtime = ?, scanned_at = ? WHERE id = ?",
+                    (st.st_size, st.st_mtime, now, row["id"]))
+                stats.touched += 1
+                return
+            if row:
+                file_id = row["id"]
+                self.db.execute(
+                    "UPDATE files SET hash = ?, size = ?, mtime = ?, scanned_at = ? "
+                    "WHERE id = ?",
+                    (digest, st.st_size, st.st_mtime, now, file_id))
+                self.db.execute(
+                    "DELETE FROM tags WHERE file_id = ? AND manual = 0", (file_id,))
+            else:
+                cur = self.db.execute(
+                    "INSERT INTO files (path, hash, size, mtime, scanned_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (str(path), digest, st.st_size, st.st_mtime, now))
+                file_id = cur.lastrowid
+            manual = {r["tag"] for r in self.db.execute(
+                "SELECT tag FROM tags WHERE file_id = ? AND manual = 1", (file_id,))}
+            self.db.executemany(
+                "INSERT OR IGNORE INTO tags (file_id, tag, confidence, manual) "
+                "VALUES (?, ?, ?, 0)",
+                [(file_id, t.lower(), float(c)) for t, c in pairs
+                 if t.lower() not in manual])
+            stats.tagged += 1
 
     def _walk(self, roots, exts):
         for root in roots:
