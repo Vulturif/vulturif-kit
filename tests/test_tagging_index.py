@@ -1,6 +1,7 @@
 """The SQLite tag index: incremental scanning, manual overrides, querying."""
 
 import os
+import threading
 
 from vulturif_kit.tagging.index import TagIndex
 
@@ -124,6 +125,63 @@ def test_prune_drops_vanished_files(tmp_path):
         stats = idx.scan(tmp_path, tagger)
         assert stats.removed == 1
         assert idx.count() == 1
+
+
+def test_scan_on_a_worker_thread(tmp_path):
+    # The GUI creates the index on one thread (a dialog) and scans on another (a
+    # worker); sqlite forbids sharing a connection across threads unless the index
+    # is thread-safe. This reproduces that exact arrangement.
+    _img(tmp_path, "a.jpg")
+    _img(tmp_path, "b.jpg")
+    idx = TagIndex(tmp_path / "idx.db")                 # created on the main thread
+    tagger = StubTagger({"a.jpg": [("solo", 0.9)], "b.jpg": [("duo", 0.8)]})
+    err = []
+
+    def work():
+        try:
+            idx.scan(tmp_path, tagger)                  # run on another thread
+        except Exception as e:                           # pragma: no cover
+            err.append(e)
+
+    t = threading.Thread(target=work)
+    t.start()
+    t.join()
+    assert not err, err
+    assert idx.count() == 2                             # read back on the main thread
+    assert idx.query("solo") == [str(tmp_path / "a.jpg")]
+    idx.close()
+
+
+def test_concurrent_query_during_scan(tmp_path):
+    # A query firing while a scan is mid-run must not blow up on the shared
+    # connection. The stub blocks briefly per file so the two genuinely overlap.
+    for i in range(6):
+        _img(tmp_path, f"{i}.jpg")
+    idx = TagIndex(tmp_path / "idx.db")
+    gate = threading.Event()
+
+    class SlowTagger:
+        def tag(self, path):
+            gate.set()
+            return [("solo", 0.9)]
+
+    err = []
+
+    def work():
+        try:
+            idx.scan(tmp_path, SlowTagger())
+        except Exception as e:                           # pragma: no cover
+            err.append(e)
+
+    t = threading.Thread(target=work)
+    t.start()
+    gate.wait(2)
+    for _ in range(20):
+        idx.query("solo")                               # hammer reads during the scan
+    t.join()
+    assert not err, err
+    assert idx.count() == 6
+    idx.close()
 
 
 def test_persists_to_disk(tmp_path):

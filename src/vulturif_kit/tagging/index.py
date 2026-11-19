@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,11 +87,21 @@ class TagIndex:
         self.path = str(db_path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        # The scan runs on a background thread while queries come from the GUI
+        # thread, so one connection has to cross threads. sqlite forbids that by
+        # default; ``check_same_thread=False`` allows it and ``_lock`` serialises
+        # every access so the threads never touch the connection at once. WAL
+        # lets a query read while a scan is mid-write (ignored for ``:memory:``).
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.executescript(_SCHEMA)
-        self.db.commit()
+        with self._lock:
+            self.db.execute("PRAGMA foreign_keys = ON")
+            self.db.execute("PRAGMA busy_timeout = 5000")
+            if self.path != ":memory:":
+                self.db.execute("PRAGMA journal_mode = WAL")
+            self.db.executescript(_SCHEMA)
+            self.db.commit()
 
     def __enter__(self):
         return self
@@ -99,7 +110,8 @@ class TagIndex:
         self.close()
 
     def close(self):
-        self.db.close()
+        with self._lock:
+            self.db.close()
 
     # ── scanning ───────────────────────────────────────────────────────────
 
@@ -135,7 +147,8 @@ class TagIndex:
 
         if prune and not stats.stopped:
             stats.removed = self._prune(roots, seen_paths)
-        self.db.commit()
+        with self._lock:
+            self.db.commit()
         return stats
 
     def _walk(self, roots, exts):
@@ -152,62 +165,67 @@ class TagIndex:
     def _index_one(self, path, tagger, stats: ScanStats):
         st = path.stat()
         key = str(path)
-        row = self.db.execute(
-            "SELECT id, hash, size, mtime FROM files WHERE path = ?", (key,)
-        ).fetchone()
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id, hash, size, mtime FROM files WHERE path = ?", (key,)
+            ).fetchone()
 
         # Fast path: known file, same size and mtime → assume unchanged.
         if row and row["size"] == st.st_size and row["mtime"] == st.st_mtime:
             stats.skipped += 1
             return
 
-        digest = _sha256(path)
+        digest = _sha256(path)                   # slow I/O — kept outside the lock
 
         if row and row["hash"] == digest:
             # Same bytes, only the mtime moved: refresh the stat, keep the tags.
-            self.db.execute(
-                "UPDATE files SET size = ?, mtime = ?, scanned_at = ? WHERE id = ?",
-                (st.st_size, st.st_mtime, time.time(), row["id"]))
+            with self._lock:
+                self.db.execute(
+                    "UPDATE files SET size = ?, mtime = ?, scanned_at = ? WHERE id = ?",
+                    (st.st_size, st.st_mtime, time.time(), row["id"]))
             stats.touched += 1
             return
 
-        pairs = tagger.tag(path)                 # [(tag, confidence), ...]
-        now = time.time()
-        if row:
-            file_id = row["id"]
-            self.db.execute(
-                "UPDATE files SET hash = ?, size = ?, mtime = ?, scanned_at = ? "
-                "WHERE id = ?",
-                (digest, st.st_size, st.st_mtime, now, file_id))
-            # Replace auto rows only; manual corrections survive the re-scan.
-            self.db.execute(
-                "DELETE FROM tags WHERE file_id = ? AND manual = 0", (file_id,))
-        else:
-            cur = self.db.execute(
-                "INSERT INTO files (path, hash, size, mtime, scanned_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (key, digest, st.st_size, st.st_mtime, now))
-            file_id = cur.lastrowid
+        pairs = tagger.tag(path)                 # the slow part (inference) — also
+        now = time.time()                        # outside the lock, so a query can
+        with self._lock:                         # run against the db between files
+            if row:
+                file_id = row["id"]
+                self.db.execute(
+                    "UPDATE files SET hash = ?, size = ?, mtime = ?, scanned_at = ? "
+                    "WHERE id = ?",
+                    (digest, st.st_size, st.st_mtime, now, file_id))
+                # Replace auto rows only; manual corrections survive the re-scan.
+                self.db.execute(
+                    "DELETE FROM tags WHERE file_id = ? AND manual = 0", (file_id,))
+            else:
+                cur = self.db.execute(
+                    "INSERT INTO files (path, hash, size, mtime, scanned_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (key, digest, st.st_size, st.st_mtime, now))
+                file_id = cur.lastrowid
 
-        manual = {r["tag"] for r in self.db.execute(
-            "SELECT tag FROM tags WHERE file_id = ? AND manual = 1", (file_id,))}
-        self.db.executemany(
-            "INSERT OR IGNORE INTO tags (file_id, tag, confidence, manual) "
-            "VALUES (?, ?, ?, 0)",
-            [(file_id, t.lower(), float(c)) for t, c in pairs
-             if t.lower() not in manual])
+            manual = {r["tag"] for r in self.db.execute(
+                "SELECT tag FROM tags WHERE file_id = ? AND manual = 1", (file_id,))}
+            self.db.executemany(
+                "INSERT OR IGNORE INTO tags (file_id, tag, confidence, manual) "
+                "VALUES (?, ?, ?, 0)",
+                [(file_id, t.lower(), float(c)) for t, c in pairs
+                 if t.lower() not in manual])
         stats.tagged += 1
 
     def _prune(self, roots, seen_paths) -> int:
         roots_s = [str(r) for r in roots]
         removed = 0
-        for r in self.db.execute("SELECT id, path FROM files").fetchall():
-            p = r["path"]
-            if p in seen_paths:
-                continue
-            if any(p == rs or p.startswith(rs + os.sep) for rs in roots_s):
-                self.db.execute("DELETE FROM files WHERE id = ?", (r["id"],))
-                removed += 1
+        with self._lock:
+            rows = self.db.execute("SELECT id, path FROM files").fetchall()
+            for r in rows:
+                p = r["path"]
+                if p in seen_paths:
+                    continue
+                if any(p == rs or p.startswith(rs + os.sep) for rs in roots_s):
+                    self.db.execute("DELETE FROM files WHERE id = ?", (r["id"],))
+                    removed += 1
         return removed
 
     # ── manual corrections ─────────────────────────────────────────────────
@@ -216,38 +234,40 @@ class TagIndex:
         """Record a hand correction: add ``tag`` to the image, or remove it.
         Marked ``manual = 1`` so the next scan leaves it be."""
         tag = tag.lower()
-        row = self.db.execute(
-            "SELECT id FROM files WHERE path = ?", (str(path),)).fetchone()
-        if not row:
-            raise KeyError(f"not indexed: {path}")
-        if present:
-            self.db.execute(
-                "INSERT INTO tags (file_id, tag, confidence, manual) "
-                "VALUES (?, ?, 1.0, 1) "
-                "ON CONFLICT(file_id, tag) DO UPDATE SET manual = 1",
-                (row["id"], tag))
-        else:
-            # A manual removal is a manual row the query layer treats as absent;
-            # simplest is to delete the tag and record the override as confidence 0.
-            self.db.execute(
-                "INSERT INTO tags (file_id, tag, confidence, manual) "
-                "VALUES (?, ?, 0.0, 1) "
-                "ON CONFLICT(file_id, tag) DO UPDATE SET manual = 1, confidence = 0.0",
-                (row["id"], tag))
-        self.db.commit()
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id FROM files WHERE path = ?", (str(path),)).fetchone()
+            if not row:
+                raise KeyError(f"not indexed: {path}")
+            if present:
+                self.db.execute(
+                    "INSERT INTO tags (file_id, tag, confidence, manual) "
+                    "VALUES (?, ?, 1.0, 1) "
+                    "ON CONFLICT(file_id, tag) DO UPDATE SET manual = 1",
+                    (row["id"], tag))
+            else:
+                # A manual removal is a manual row the query layer treats as
+                # absent; record the override as confidence 0.
+                self.db.execute(
+                    "INSERT INTO tags (file_id, tag, confidence, manual) "
+                    "VALUES (?, ?, 0.0, 1) "
+                    "ON CONFLICT(file_id, tag) DO UPDATE SET manual = 1, confidence = 0.0",
+                    (row["id"], tag))
+            self.db.commit()
 
     # ── reading ────────────────────────────────────────────────────────────
 
     def tags_for(self, path) -> dict:
         """``{tag: confidence}`` for one file. A manual removal (confidence 0) is
         excluded so it reads as absent."""
-        row = self.db.execute(
-            "SELECT id FROM files WHERE path = ?", (str(path),)).fetchone()
-        if not row:
-            return {}
-        return {r["tag"]: r["confidence"] for r in self.db.execute(
-            "SELECT tag, confidence FROM tags WHERE file_id = ? AND confidence > 0",
-            (row["id"],))}
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id FROM files WHERE path = ?", (str(path),)).fetchone()
+            if not row:
+                return {}
+            return {r["tag"]: r["confidence"] for r in self.db.execute(
+                "SELECT tag, confidence FROM tags WHERE file_id = ? AND confidence > 0",
+                (row["id"],))}
 
     def query(self, text: str) -> list:
         """Every indexed path matching the rule34 query ``text``, as a sorted
@@ -256,45 +276,48 @@ class TagIndex:
         node = query.parse(text)
         wanted = query.positive_tags(node)
 
-        if wanted:
-            marks = ",".join("?" * len(wanted))
-            rows = self.db.execute(
-                f"SELECT DISTINCT file_id FROM tags "
-                f"WHERE confidence > 0 AND tag IN ({marks})", tuple(wanted))
-            candidates = [r["file_id"] for r in rows]
-        else:
-            candidates = [r["id"] for r in
-                          self.db.execute("SELECT id FROM files")]
+        with self._lock:
+            if wanted:
+                marks = ",".join("?" * len(wanted))
+                rows = self.db.execute(
+                    f"SELECT DISTINCT file_id FROM tags "
+                    f"WHERE confidence > 0 AND tag IN ({marks})", tuple(wanted))
+                candidates = [r["file_id"] for r in rows]
+            else:
+                candidates = [r["id"] for r in
+                              self.db.execute("SELECT id FROM files")]
 
-        out = []
-        for file_id in candidates:
-            rows = self.db.execute(
-                "SELECT tag, confidence FROM tags WHERE file_id = ? AND confidence > 0",
-                (file_id,)).fetchall()
-            tags = {r["tag"] for r in rows}
-            scores = {r["tag"]: r["confidence"] for r in rows}
-            if query.evaluate(node, tags, scores):
-                p = self.db.execute(
-                    "SELECT path FROM files WHERE id = ?", (file_id,)).fetchone()
-                if p:
-                    out.append(p["path"])
+            out = []
+            for file_id in candidates:
+                rows = self.db.execute(
+                    "SELECT tag, confidence FROM tags WHERE file_id = ? AND confidence > 0",
+                    (file_id,)).fetchall()
+                tags = {r["tag"] for r in rows}
+                scores = {r["tag"]: r["confidence"] for r in rows}
+                if query.evaluate(node, tags, scores):
+                    p = self.db.execute(
+                        "SELECT path FROM files WHERE id = ?", (file_id,)).fetchone()
+                    if p:
+                        out.append(p["path"])
         out.sort()
         return out
 
     def all_tags(self, prefix: str = "", limit: int = 50) -> list:
         """``[(tag, count), ...]`` over the library, most common first — for tag
         autocomplete. ``prefix`` filters to tags starting with it."""
-        if prefix:
-            rows = self.db.execute(
-                "SELECT tag, COUNT(*) c FROM tags WHERE confidence > 0 AND tag LIKE ? "
-                "GROUP BY tag ORDER BY c DESC LIMIT ?",
-                (prefix.lower() + "%", limit))
-        else:
-            rows = self.db.execute(
-                "SELECT tag, COUNT(*) c FROM tags WHERE confidence > 0 "
-                "GROUP BY tag ORDER BY c DESC LIMIT ?", (limit,))
+        with self._lock:
+            if prefix:
+                rows = self.db.execute(
+                    "SELECT tag, COUNT(*) c FROM tags WHERE confidence > 0 AND tag LIKE ? "
+                    "GROUP BY tag ORDER BY c DESC LIMIT ?",
+                    (prefix.lower() + "%", limit)).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT tag, COUNT(*) c FROM tags WHERE confidence > 0 "
+                    "GROUP BY tag ORDER BY c DESC LIMIT ?", (limit,)).fetchall()
         return [(r["tag"], r["c"]) for r in rows]
 
     def count(self) -> int:
         """How many files are indexed."""
-        return self.db.execute("SELECT COUNT(*) c FROM files").fetchone()["c"]
+        with self._lock:
+            return self.db.execute("SELECT COUNT(*) c FROM files").fetchone()["c"]
