@@ -8,6 +8,14 @@ changed file is hashed and re-tagged. A content hash is the final arbiter, so a
 file that was merely *touched* (new mtime, same bytes) costs a hash but not a
 re-tag.
 
+A file that reappears at a **new path** with the same bytes — a move or a
+rename — is recognised by that content hash: instead of tagging it afresh and
+pruning the old row (which would lose the file's tags, hand corrections
+included), the existing row is repointed to the new path and keeps everything.
+It is treated as a move only when the hash is unambiguous (exactly one indexed
+row carries it and that row's old file is gone from disk); genuine duplicates
+and ambiguous cases fall back to tagging the new path normally.
+
 Tags the user fixed by hand are marked ``manual = 1`` and a re-scan never
 clobbers them — only the auto rows from the tagger are replaced.
 
@@ -56,6 +64,7 @@ CREATE TABLE IF NOT EXISTS tags (
     PRIMARY KEY (file_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
 """
 
 
@@ -66,6 +75,7 @@ class ScanStats:
     skipped: int = 0       # unchanged, left alone
     tagged: int = 0        # new or changed, re-tagged
     touched: int = 0       # same bytes, new mtime — hashed but not re-tagged
+    moved: int = 0         # same bytes at a new path — repointed, tags kept
     failed: int = 0        # could not read / tag
     removed: int = 0       # pruned: gone from disk
     stopped: bool = False  # the stop() callback cut it short
@@ -123,7 +133,10 @@ class TagIndex:
         ``on_progress(stats, path)`` is called as each file is handled and
         ``stop()`` is polled between files, so a closing window need not wait for
         a whole library. With ``prune`` on, rows for files that no longer exist
-        **under the scanned roots** are deleted.
+        **under the scanned roots** are deleted — but a file that simply moved to
+        a new path is matched by content hash first and its row (with every tag)
+        follows it, rather than being re-tagged at the new path and pruned at the
+        old one.
 
         With ``workers`` > 1 the slow part — hashing and tagging — runs in a
         thread pool while every database write stays on this thread (so the db
@@ -244,6 +257,15 @@ class TagIndex:
                 self.db.execute(
                     "DELETE FROM tags WHERE file_id = ? AND manual = 0", (file_id,))
             else:
+                # New path: a move of an already-indexed file keeps that file's
+                # row and tags (the just-computed `pairs` is for the same bytes,
+                # so discarding it changes nothing). Resolving the move here, on
+                # the single writer, keeps it race-free across the pool.
+                src = self._find_move_source(digest)
+                if src is not None:
+                    self._repoint(src["id"], path, st, now)
+                    stats.moved += 1
+                    return
                 cur = self.db.execute(
                     "INSERT INTO files (path, hash, size, mtime, scanned_at) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -269,6 +291,27 @@ class TagIndex:
                     if os.path.splitext(n)[1].lower() in exts:
                         yield Path(dirpath) / n
 
+    def _find_move_source(self, digest):
+        """The one indexed row whose content hash is ``digest`` and whose file has
+        vanished from disk — the same bytes reappearing at a new path. Returns
+        that row, or ``None`` when there is no such match or it is ambiguous
+        (several rows share the hash, so which one *moved* can't be told, or the
+        single match's file still exists and is thus a genuine duplicate)."""
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id, path FROM files WHERE hash = ?", (digest,)).fetchall()
+        if len(rows) == 1 and not os.path.exists(rows[0]["path"]):
+            return rows[0]
+        return None
+
+    def _repoint(self, source_id, path, st, now):
+        """Move the row ``source_id`` to ``path`` (same bytes, so hash and every
+        tag stay). Caller holds ``self._lock``."""
+        self.db.execute(
+            "UPDATE files SET path = ?, size = ?, mtime = ?, scanned_at = ? "
+            "WHERE id = ?",
+            (str(path), st.st_size, st.st_mtime, now, source_id))
+
     def _index_one(self, path, tagger, stats: ScanStats):
         st = path.stat()
         key = str(path)
@@ -292,6 +335,17 @@ class TagIndex:
                     (st.st_size, st.st_mtime, time.time(), row["id"]))
             stats.touched += 1
             return
+
+        if row is None:
+            # A new path. Before tagging it, see whether these exact bytes are an
+            # existing file that moved here — if so, carry its tags over instead
+            # of re-running the tagger (and the old row won't be pruned).
+            src = self._find_move_source(digest)
+            if src is not None:
+                with self._lock:
+                    self._repoint(src["id"], path, st, time.time())
+                stats.moved += 1
+                return
 
         pairs = tagger.tag(path)                 # the slow part (inference) — also
         now = time.time()                        # outside the lock, so a query can

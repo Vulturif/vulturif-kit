@@ -127,6 +127,81 @@ def test_prune_drops_vanished_files(tmp_path):
         assert idx.count() == 1
 
 
+def test_move_keeps_tags_without_retagging(tmp_path):
+    # A file that reappears at a new path with the same bytes is recognised by
+    # its content hash: the row follows it, tags and all, and the tagger is not
+    # run again.
+    src = tmp_path / "sub"
+    src.mkdir()
+    p = _img(src, "a.jpg", b"the only pixels")
+    tagger = StubTagger(default=(("solo", 0.9),))
+    with TagIndex(":memory:") as idx:
+        idx.scan(tmp_path, tagger)
+        assert tagger.calls == 1
+        idx.set_manual(p, "favourite", True)
+
+        moved = tmp_path / "renamed.jpg"            # same bytes, new path
+        p.rename(moved)
+        stats = idx.scan(tmp_path, tagger)
+
+        assert stats.moved == 1
+        assert stats.tagged == 0
+        assert stats.removed == 0                   # the old row was not pruned
+        assert idx.count() == 1
+        tags = idx.tags_for(moved)
+        assert "solo" in tags and "favourite" in tags
+        assert idx.tags_for(p) == {}                # nothing left at the old path
+    assert tagger.calls == 1                         # the tagger never ran again
+
+
+def test_duplicate_is_not_treated_as_a_move(tmp_path):
+    # Two files with identical bytes, both present: the second is a genuine
+    # duplicate, not a move, so it is tagged on its own path.
+    _img(tmp_path, "a.jpg", b"same bytes")
+    tagger = StubTagger(default=(("solo", 0.9),))
+    with TagIndex(":memory:") as idx:
+        idx.scan(tmp_path, tagger)
+        _img(tmp_path, "b.jpg", b"same bytes")      # duplicate appears
+        stats = idx.scan(tmp_path, tagger)
+        assert stats.moved == 0
+        assert stats.tagged == 1
+        assert idx.count() == 2
+
+
+def test_ambiguous_hash_falls_back_to_tagging(tmp_path):
+    # Two identical files already indexed; one vanishes and a third identical
+    # file appears elsewhere. Which "moved" can't be told, so no row is
+    # repointed — the new path is tagged and the vanished one is pruned.
+    a = _img(tmp_path, "a.jpg", b"identical")
+    _img(tmp_path, "b.jpg", b"identical")
+    tagger = StubTagger(default=(("solo", 0.9),))
+    with TagIndex(":memory:") as idx:
+        idx.scan(tmp_path, tagger)
+        assert idx.count() == 2
+        a.unlink()
+        _img(tmp_path, "c.jpg", b"identical")       # new identical file
+        stats = idx.scan(tmp_path, tagger)
+        assert stats.moved == 0
+        assert stats.tagged == 1
+        assert stats.removed == 1
+        assert idx.count() == 2
+
+
+def test_parallel_move_keeps_tags(tmp_path):
+    for i in range(6):
+        _img(tmp_path, f"{i}.jpg", data=f"pixels-{i}".encode())
+    p0 = tmp_path / "0.jpg"
+    with TagIndex(tmp_path / "x.db") as idx:
+        idx.scan(tmp_path, _mk(), workers=3)
+        idx.set_manual(p0, "keeper", True)
+        p0.rename(tmp_path / "0-moved.jpg")
+        stats = idx.scan(tmp_path, _mk(), workers=3)
+        assert stats.moved == 1
+        assert stats.removed == 0
+        assert idx.count() == 6
+        assert "keeper" in idx.tags_for(tmp_path / "0-moved.jpg")
+
+
 def test_scan_on_a_worker_thread(tmp_path):
     # The GUI creates the index on one thread (a dialog) and scans on another (a
     # worker); sqlite forbids sharing a connection across threads unless the index
