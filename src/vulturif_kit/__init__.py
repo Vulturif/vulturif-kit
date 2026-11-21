@@ -25,7 +25,7 @@ from .license import BadLicense, License
 from .signature import BadSignature
 from .updater import Asset, Update
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 __all__ = ["App", "Asset", "BadDownload", "BadLicense", "BadSignature", "Download",
            "Downloader", "License", "LICENSE_PUBLIC_KEYS", "PUBLIC_KEYS", "SITE",
